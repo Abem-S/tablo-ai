@@ -3,3 +3,6 @@ uvicorn
 google-genai
 langgraph
 python-dotenv
+livekit-api
+livekit-agents
+livekit-plugins-google

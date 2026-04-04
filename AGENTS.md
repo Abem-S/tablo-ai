@@ -66,6 +66,16 @@ For early implementation work:
 - It is acceptable to build infrastructure, backend readiness, board sync, and session bootstrap before full voice.
 - It is not acceptable to let temporary text-input development hacks become the visible product direction.
 
+### Day 2 — What is now implemented
+
+Day 2 shipped a working LiveKit + Gemini Live voice loop:
+
+- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room with `AutoSubscribe.AUDIO_ONLY`, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"`, starts an `AgentSession` with an `Agent` instance, and calls `await session.generate_reply()` to greet the learner.
+- **`backend/main.py`** — `/livekit/token` issues a signed participant JWT and dispatches `tablo-assistant` to the room via `livekit_api.agent_dispatch.create_dispatch`.
+- **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects with the token from the backend. `RoomAudioRenderer` plays AI audio. `VoiceAssistantControlBar` appears when connected.
+- **Key env vars required:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY` (the plugin reads `GOOGLE_API_KEY`, not `GEMINI_API_KEY`).
+- **Model note:** `gemini-live-2.5-flash-native-audio` is Vertex AI only. The standard Gemini API key model name is `gemini-2.5-flash-native-audio-preview-12-2025`.
+
 ## Frontend Implementation Guardrails
 
 - Prefer full-screen or nearly full-screen board layouts.
@@ -78,7 +88,10 @@ For early implementation work:
 
 - Prefer small, honest endpoints over fake AI behavior that does not belong in the product.
 - Early backend work should expose real readiness, bootstrap, sync, or orchestration boundaries.
-- Keep the backend shaped for eventual LiveKit + Gemini Live + LangGraph integration.
+- LiveKit + Gemini Live voice is **now working** — do not regress it.
+- `livekit-agents` worker must be run separately from FastAPI: `python agent.py dev`.
+- `AgentSession.start()` in v1.5+ requires `agent=Agent(...)` as the first positional arg and `room=ctx.room` as a keyword — not `session.start(ctx.room)`.
+- The plugin env var is `GOOGLE_API_KEY`. `GEMINI_API_KEY` alone is not read by the plugin.
 
 ## Agent Behavior for This Repo
 

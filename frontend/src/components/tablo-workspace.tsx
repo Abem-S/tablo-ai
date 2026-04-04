@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Tldraw, type Editor } from "tldraw";
+import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar } from "@livekit/components-react";
+import "@livekit/components-styles";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -29,6 +31,36 @@ type BoardMetrics = {
   summary: string;
   shapeCount: number;
   selectedCount: number;
+};
+
+type RealtimeConfig = {
+  configured: boolean;
+  livekit_url: string | null;
+  backend_conversion_boundary: string;
+  livekit_audio_hz: number;
+  gemini_input_hz: number;
+  gemini_output_hz: number;
+  notes: string[];
+};
+
+type LiveKitTokenResponse = {
+  server_url: string;
+  room_name: string;
+  participant_identity: string;
+  token: string;
+};
+
+type LiveKitRoomLike = {
+  connect: (
+    url: string,
+    token: string,
+    options?: { autoSubscribe?: boolean }
+  ) => Promise<void>;
+  disconnect: () => void;
+  localParticipant: {
+    setMicrophoneEnabled: (enabled: boolean) => Promise<void>;
+  };
+  on: (event: string, listener: (...args: unknown[]) => void) => void;
 };
 
 function getBoardMetrics(editor: Editor | null): BoardMetrics {
@@ -80,6 +112,18 @@ export function TabloWorkspace() {
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading"
   );
+  const [realtimeConfig, setRealtimeConfig] = useState<RealtimeConfig | null>(
+    null
+  );
+  const [roomState, setRoomState] = useState<
+    "idle" | "connecting" | "connected" | "error"
+  >("idle");
+  const [roomDetails, setRoomDetails] = useState<{
+    roomName: string;
+    participantIdentity: string;
+    serverUrl?: string;
+    token?: string;
+  } | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const syncTimeoutRef = useRef<number | null>(null);
 
@@ -91,9 +135,10 @@ export function TabloWorkspace() {
       setErrorMessage("");
 
       try {
-        const [healthRes, sessionRes] = await Promise.all([
+        const [healthRes, sessionRes, realtimeRes] = await Promise.all([
           fetch(`${API_BASE_URL}/health`),
           fetch(`${API_BASE_URL}/session/bootstrap`),
+          fetch(`${API_BASE_URL}/realtime/config`),
         ]);
 
         if (!healthRes.ok) {
@@ -106,10 +151,18 @@ export function TabloWorkspace() {
           );
         }
 
-        const data = (await sessionRes.json()) as SessionBootstrap;
+        if (!realtimeRes.ok) {
+          throw new Error(
+            `Realtime config failed with status ${realtimeRes.status}`
+          );
+        }
+
+        const sessionData = (await sessionRes.json()) as SessionBootstrap;
+        const realtimeData = (await realtimeRes.json()) as RealtimeConfig;
 
         if (!cancelled) {
-          setSession(data);
+          setSession(sessionData);
+          setRealtimeConfig(realtimeData);
           setStatus("ready");
         }
       } catch (error) {
@@ -198,37 +251,73 @@ export function TabloWorkspace() {
     };
   }, [editor, session]);
 
-  return (
-    <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50">
-      <div className="relative flex min-h-screen flex-col">
-        <header className="absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-3 px-4 py-4 md:px-6">
-          <div className="max-w-xl rounded-[24px] border border-white/10 bg-slate-950/45 px-4 py-3 backdrop-blur">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.32em] text-cyan-200/75">
-              Tablo Day 1
-            </p>
-            <h1 className="mt-2 text-lg font-semibold tracking-tight text-white md:text-xl">
-              Board workspace
-            </h1>
-            <p className="mt-2 text-xs leading-5 text-slate-300 md:text-sm">
-              The first day focuses on the core surface: a full-screen canvas,
-              backend readiness, and the session shell that voice will connect
-              into next.
-            </p>
-          </div>
+  async function connectLiveKit() {
+    if (!session || !realtimeConfig?.configured) {
+      setErrorMessage(
+        "LiveKit is not configured yet. Add LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET to the backend."
+      );
+      return;
+    }
 
-          <div className="hidden gap-2 md:flex">
-            <div className="rounded-full border border-emerald-300/25 bg-emerald-400/10 px-3 py-1.5 text-xs text-slate-100">
-              board active
-            </div>
-            <div className="rounded-full border border-cyan-300/25 bg-cyan-400/10 px-3 py-1.5 text-xs text-slate-100">
-              {status === "loading"
-                ? "connecting"
-                : status === "ready"
-                  ? "backend ready"
-                  : "backend error"}
-            </div>
-          </div>
-        </header>
+    setRoomState("connecting");
+    setErrorMessage("");
+
+    try {
+      const tokenRes = await fetch(`${API_BASE_URL}/livekit/token`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: session.session_id,
+        }),
+      });
+
+      if (!tokenRes.ok) {
+        const errorText = await tokenRes.text();
+        throw new Error(
+          `LiveKit token request failed with status ${tokenRes.status}: ${errorText}`
+        );
+      }
+
+      const tokenData = (await tokenRes.json()) as LiveKitTokenResponse;
+
+      setRoomDetails({
+        roomName: tokenData.room_name,
+        participantIdentity: tokenData.participant_identity,
+        serverUrl: tokenData.server_url,
+        token: tokenData.token,
+      });
+    } catch (error) {
+      setRoomState("error");
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Something went wrong while connecting to LiveKit."
+      );
+    }
+  }
+
+  function disconnectLiveKit() {
+    setRoomDetails(null);
+    setRoomState("idle");
+  }
+
+  return (
+    <LiveKitRoom
+      serverUrl={roomDetails?.serverUrl}
+      token={roomDetails?.token}
+      connect={!!roomDetails}
+      audio={true}
+      onConnected={() => setRoomState("connected")}
+      onDisconnected={() => {
+        setRoomState("idle");
+        setRoomDetails(null);
+      }}
+    >
+      <RoomAudioRenderer />
+      <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50">
+        <div className="relative flex min-h-screen flex-col">
 
         <section className="flex min-h-screen flex-1">
           <div className="relative flex-1 overflow-hidden">
@@ -237,32 +326,26 @@ export function TabloWorkspace() {
             </div>
           </div>
 
-          <aside className="hidden w-[360px] shrink-0 border-l border-white/10 bg-slate-950/62 p-4 backdrop-blur xl:flex xl:flex-col">
+          <aside className="hidden w-[380px] shrink-0 border-l border-white/10 bg-slate-950/62 p-4 backdrop-blur xl:flex xl:flex-col">
             <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
               <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-200/70">
-                Session status
+                Realtime status
               </p>
               <p className="mt-3 text-sm leading-6 text-slate-300">
-                Day 1 establishes the board shell and backend connection state.
-                Voice transport, live transcript, and AI streaming connect into
-                this session layer next.
+                This shell is now aligned with the actual product direction:
+                LiveKit for room transport, backend-issued tokens, and backend
+                audio conversion before Gemini Live.
               </p>
             </div>
 
-            <div className="mt-4 flex-1 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
+            <div className="mt-4 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
               <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                Workspace readiness
+                Session readiness
               </p>
 
               {status === "error" ? (
                 <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-400/10 p-4 text-sm leading-6 text-rose-100">
                   {errorMessage}
-                </div>
-              ) : null}
-
-              {status === "loading" ? (
-                <div className="mt-4 rounded-[20px] border border-white/10 bg-white/4 p-4 text-sm leading-6 text-slate-300">
-                  Connecting the board workspace to the backend session shell...
                 </div>
               ) : null}
 
@@ -277,31 +360,6 @@ export function TabloWorkspace() {
                     <p className="mt-1">{session.backend_status}</p>
                   </div>
                   <div>
-                    <p className="font-medium text-white">Transport status</p>
-                    <p className="mt-1">{session.transport_status}</p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Board status</p>
-                    <p className="mt-1">{session.board_status}</p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Live board metrics</p>
-                    <p className="mt-1">{boardMetrics.summary}</p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Capabilities</p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {session.capabilities.map((capability) => (
-                        <span
-                          key={capability}
-                          className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-xs text-slate-200"
-                        >
-                          {capability}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
                     <p className="font-medium text-white">Board sync</p>
                     <p className="mt-1">
                       {syncState === "syncing"
@@ -311,42 +369,123 @@ export function TabloWorkspace() {
                           : "Waiting for first board change."}
                     </p>
                   </div>
+                  <div>
+                    <p className="font-medium text-white">Live board metrics</p>
+                    <p className="mt-1">{boardMetrics.summary}</p>
+                  </div>
                 </div>
               ) : null}
+            </div>
+
+            <div className="mt-4 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
+                LiveKit setup
+              </p>
+              {realtimeConfig ? (
+                <div className="mt-4 space-y-4 text-sm leading-6 text-slate-200">
+                  <div>
+                    <p className="font-medium text-white">Configured</p>
+                    <p className="mt-1">
+                      {realtimeConfig.configured
+                        ? `Yes${realtimeConfig.livekit_url ? `, ${realtimeConfig.livekit_url}` : ""}`
+                        : "No. Add backend LiveKit credentials to enable room connection."}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-medium text-white">Audio pipeline</p>
+                    <p className="mt-1">
+                      LiveKit transport: {realtimeConfig.livekit_audio_hz} Hz
+                      → Gemini input: {realtimeConfig.gemini_input_hz} Hz →
+                      Gemini output: {realtimeConfig.gemini_output_hz} Hz →
+                      back to LiveKit.
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-medium text-white">Conversion boundary</p>
+                    <p className="mt-1">
+                      {realtimeConfig.backend_conversion_boundary}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-medium text-white">Notes</p>
+                    <ul className="mt-2 list-disc space-y-2 pl-5 text-slate-300">
+                      {realtimeConfig.notes.map((note) => (
+                        <li key={note}>{note}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-4 flex-1 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
+                Room connection
+              </p>
+              <div className="mt-4 space-y-4 text-sm leading-6 text-slate-200">
+                <div>
+                  <p className="font-medium text-white">State</p>
+                  <p className="mt-1">
+                    {roomState === "connected"
+                      ? "Connected to LiveKit room."
+                      : roomState === "connecting"
+                        ? "Connecting to LiveKit..."
+                        : roomState === "error"
+                          ? "LiveKit connection failed."
+                          : "Not connected yet."}
+                  </p>
+                </div>
+                {roomDetails ? (
+                  <>
+                    <div>
+                      <p className="font-medium text-white">Room</p>
+                      <p className="mt-1">{roomDetails.roomName}</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-white">Participant</p>
+                      <p className="mt-1">{roomDetails.participantIdentity}</p>
+                    </div>
+                  </>
+                ) : null}
+              </div>
             </div>
           </aside>
         </section>
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 md:px-6 md:pb-6">
-          <div className="pointer-events-auto mx-auto max-w-5xl rounded-[30px] border border-white/10 bg-slate-950/70 p-4 shadow-[0_24px_80px_rgba(3,8,20,0.45)] backdrop-blur">
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div className="max-w-3xl">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-200/75">
-                  Session shell
-                </p>
-                <p className="mt-2 text-sm leading-6 text-slate-300">
-                  Day 1 now proves three visible things: the board is active,
-                  the frontend can establish a backend session, and board
-                  changes are being summarized and synced to the backend.
-                </p>
+          <div className="pointer-events-auto mx-auto max-w-xl rounded-[30px] border border-white/10 bg-slate-950/70 px-4 py-3 shadow-[0_24px_80px_rgba(3,8,20,0.45)] backdrop-blur">
+            <div className="flex items-center justify-between gap-4">
+              <div className="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs text-slate-300">
+                {boardMetrics.summary}
               </div>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs text-slate-200">
-                  {boardMetrics.summary}
+              {roomState === "connected" ? (
+                <div className="flex items-center gap-3" data-lk-theme="default">
+                  <VoiceAssistantControlBar />
+                  <button
+                    className="rounded-full border border-rose-300/30 bg-rose-400/10 px-4 py-2 text-sm font-semibold text-rose-100"
+                    onClick={disconnectLiveKit}
+                    type="button"
+                  >
+                    Disconnect
+                  </button>
                 </div>
-                <div className="rounded-full border border-cyan-300/30 bg-cyan-400/10 px-4 py-3 text-sm font-semibold text-cyan-100">
-                  {syncState === "syncing"
-                    ? "Syncing changes"
-                    : snapshot
-                      ? `Backend synced ${snapshot.shape_count} shapes`
-                      : "Waiting for board change"}
-                </div>
-              </div>
+              ) : (
+                <button
+                  className="rounded-full border border-cyan-300/30 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={
+                    roomState === "connecting" || !realtimeConfig?.configured
+                  }
+                  onClick={connectLiveKit}
+                  type="button"
+                >
+                  {roomState === "connecting" ? "Connecting..." : "Connect LiveKit"}
+                </button>
+              )}
             </div>
           </div>
         </div>
       </div>
     </main>
+    </LiveKitRoom>
   );
 }

@@ -588,6 +588,21 @@ This should read as an execution plan for the architecture above, not just as a 
 
 **Day 1 UX note:** the first slice should validate the board shell and realtime session boundary, not introduce temporary product flows that do not belong in the final experience.
 
+### Day 2: LiveKit + Gemini Live Voice Loop ✅ Shipped
+
+**Goal:** replace flaky browser speech APIs with a real voice transport and AI voice backend.
+
+What shipped:
+
+- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room with `AutoSubscribe.AUDIO_ONLY`, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (Gemini's native speech-to-speech model), starts an `AgentSession` with `await session.start(agent=Agent(...), room=ctx.room)`, and greets the learner via `await session.generate_reply()`.
+- **`backend/main.py`** — `/livekit/token` endpoint issues a signed participant JWT and dispatches the `tablo-assistant` agent to the room on demand via `livekit_api.agent_dispatch.create_dispatch`.
+- **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects using the backend-issued token. `RoomAudioRenderer` plays AI voice audio. `VoiceAssistantControlBar` appears in the bottom bar when connected.
+- **Live board sync** — board shapes debounced and synced to `/board/snapshot` in real time, giving the AI board awareness.
+- **Key env vars:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`. The plugin reads `GOOGLE_API_KEY` specifically — `GEMINI_API_KEY` alone is not picked up.
+- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. The correct name for a standard Gemini API key is `gemini-2.5-flash-native-audio-preview-12-2025`.
+
+**End of Day 2 result:** a learner can open the board, click Connect, and have a real-time voice conversation with a Gemini-powered Socratic tutor — all over LiveKit WebRTC, with no browser speech hacks.
+
 ### Week 2: Socratic Interaction and Live Tutor Layer
 
 **Goal:** make the product behave like a tutor, not just an interface.
