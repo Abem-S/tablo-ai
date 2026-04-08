@@ -70,9 +70,11 @@ For early implementation work:
 
 Day 2 shipped a working LiveKit + Gemini Live voice loop:
 
-- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room with `AutoSubscribe.AUDIO_ONLY`, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"`, starts an `AgentSession` with an `Agent` instance, and calls `await session.generate_reply()` to greet the learner.
+- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"`, starts an `AgentSession` with an `Agent` instance, and calls `await session.generate_reply()` to greet the learner.
 - **`backend/main.py`** — `/livekit/token` issues a signed participant JWT and dispatches `tablo-assistant` to the room via `livekit_api.agent_dispatch.create_dispatch`.
 - **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects with the token from the backend. `RoomAudioRenderer` plays AI audio. `VoiceAssistantControlBar` appears when connected.
+- **Vision now implemented** — the frontend renders the `tldraw` page to PNG frames and publishes a board video track through LiveKit; the agent session is started with `room_io.RoomOptions(video_input=True)` so Gemini Live receives ongoing board visuals.
+- **Drawing now implemented** — the agent publishes deterministic `board.command` events and the frontend applies them directly. Current command set includes absolute commands (`create_text`, `create_geo`, `create_arrow`) plus target-aware commands (`create_text_on_target`, `create_arrow_between_targets`) that resolve targets from selection, pointer, this/that references, or explicit shape IDs.
 - **Key env vars required:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY` (the plugin reads `GOOGLE_API_KEY`, not `GEMINI_API_KEY`).
 - **Model note:** `gemini-live-2.5-flash-native-audio` is Vertex AI only. The standard Gemini API key model name is `gemini-2.5-flash-native-audio-preview-12-2025`.
 
@@ -89,6 +91,7 @@ Day 2 shipped a working LiveKit + Gemini Live voice loop:
 - Prefer small, honest endpoints over fake AI behavior that does not belong in the product.
 - Early backend work should expose real readiness, bootstrap, sync, or orchestration boundaries.
 - LiveKit + Gemini Live voice is **now working** — do not regress it.
+- Vision feed + board-command drawing are now working — do not regress them.
 - `livekit-agents` worker must be run separately from FastAPI: `python agent.py dev`.
 - `AgentSession.start()` in v1.5+ requires `agent=Agent(...)` as the first positional arg and `room=ctx.room` as a keyword — not `session.start(ctx.room)`.
 - The plugin env var is `GOOGLE_API_KEY`. `GEMINI_API_KEY` alone is not read by the plugin.

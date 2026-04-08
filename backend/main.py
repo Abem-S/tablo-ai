@@ -1,5 +1,6 @@
 import os
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -119,14 +120,15 @@ def realtime_config() -> RealtimeConfigResponse:
     return RealtimeConfigResponse(
         configured=configured,
         livekit_url=livekit_url,
-        backend_conversion_boundary="Convert audio between LiveKit and Gemini in the backend agent runtime.",
+        backend_conversion_boundary="Convert audio/video transport between LiveKit and Gemini in the backend agent runtime, while board mutations are sent as data commands.",
         livekit_audio_hz=48000,
         gemini_input_hz=16000,
         gemini_output_hz=24000,
         notes=[
             "LiveKit room connection needs a server URL plus a signed participant token.",
             "Gemini Live expects 16-bit PCM mono at 16 kHz in and returns 24 kHz audio out.",
-            "Publish browser microphone through LiveKit first; do model-specific resampling on the backend.",
+            "Publish browser microphone and a board video track through LiveKit; the agent uses live video_input for vision.",
+            "The agent can issue board drawing commands over a dedicated LiveKit data topic for deterministic rendering.",
         ],
     )
 
@@ -154,7 +156,7 @@ async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
             detail="livekit-api is not installed in the backend environment.",
         ) from exc
 
-    room_name = payload.room_name or "tablo-day2-room"
+    room_name = payload.room_name or f"tablo-{payload.session_id}-{uuid4().hex[:6]}"
     participant_identity = f"{payload.session_id}-learner"
 
     token = (
@@ -174,24 +176,29 @@ async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
         .to_jwt()
     )
 
-    async with api.LiveKitAPI(livekit_url, api_key, api_secret) as livekit_api:
-        try:
-            # We must be careful if the room doesn't exist yet it might error or return empty list
-            dispatches = await livekit_api.agent_dispatch.list_dispatch(room=room_name)
-            already_dispatched = any(d.agent_name == "tablo-assistant" for d in dispatches.items)
-        except Exception:
-            already_dispatched = False
-
-        if not already_dispatched:
+    try:
+        from livekit import api
+        async with api.LiveKitAPI(livekit_url, api_key, api_secret) as livekit_api:
+            # Check if an agent is already dispatched to this room
             try:
-                await livekit_api.agent_dispatch.create_dispatch(
-                    api.CreateAgentDispatchRequest(
-                        agent_name="tablo-assistant",
-                        room=room_name,
+                dispatches = await livekit_api.agent_dispatch.list_dispatch(room=room_name)
+                already_dispatched = any(d.agent_name == "tablo-assistant" for d in dispatches.items)
+            except Exception:
+                already_dispatched = False
+
+            if not already_dispatched:
+                try:
+                    await livekit_api.agent_dispatch.create_dispatch(
+                        api.CreateAgentDispatchRequest(
+                            agent_name="tablo-assistant",
+                            room=room_name,
+                        )
                     )
-                )
-            except Exception as e:
-                print(f"Warning: Failed to dispatch tablo-assistant: {e}")
+                    print(f"Dispatched tablo-assistant to room: {room_name}")
+                except Exception as e:
+                    print(f"Warning: Failed to dispatch tablo-assistant: {e}")
+    except Exception as e:
+        print(f"Warning: Failed to initialize LiveKit API for dispatch: {e}")
 
     return LiveKitTokenResponse(
         server_url=livekit_url,

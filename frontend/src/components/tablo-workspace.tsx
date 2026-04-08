@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Tldraw, type Editor } from "tldraw";
-import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar } from "@livekit/components-react";
+import { toRichText } from "@tldraw/tlschema";
+import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar, useRoomContext } from "@livekit/components-react";
+import { LocalVideoTrack, Track } from "livekit-client";
 import "@livekit/components-styles";
 
 const API_BASE_URL =
@@ -15,16 +17,6 @@ type SessionBootstrap = {
   backend_status: string;
   capabilities: string[];
   checked_at: string;
-};
-
-type BoardSnapshot = {
-  session_id: string;
-  board_status: string;
-  backend_status: string;
-  summary: string;
-  shape_count: number;
-  selected_count: number;
-  synced_at: string;
 };
 
 type BoardMetrics = {
@@ -50,18 +42,187 @@ type LiveKitTokenResponse = {
   token: string;
 };
 
-type LiveKitRoomLike = {
-  connect: (
-    url: string,
-    token: string,
-    options?: { autoSubscribe?: boolean }
-  ) => Promise<void>;
-  disconnect: () => void;
-  localParticipant: {
-    setMicrophoneEnabled: (enabled: boolean) => Promise<void>;
-  };
-  on: (event: string, listener: (...args: unknown[]) => void) => void;
+type BoardTargetRef =
+  | { kind: "selection"; index?: number }
+  | { kind: "pointer" }
+  | { kind: "this" }
+  | { kind: "that" }
+  | { kind: "shape_id"; shapeId: string };
+
+type BoardCommand =
+  | {
+      v: number;
+      id: string;
+      op: "create_text";
+      text: string;
+      x: number;
+      y: number;
+    }
+  | {
+      v: number;
+      id: string;
+      op: "create_text_near_selection";
+      text: string;
+      offsetX?: number;
+      offsetY?: number;
+    }
+  | {
+      v: number;
+      id: string;
+      op: "create_geo";
+      geo: "rectangle" | "ellipse" | "diamond" | "triangle";
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      label?: string;
+    }
+  | {
+      v: number;
+      id: string;
+      op: "create_arrow";
+      x: number;
+      y: number;
+      toX: number;
+      toY: number;
+    }
+  | {
+      v: number;
+      id: string;
+      op: "create_text_on_target";
+      text: string;
+      target: BoardTargetRef;
+      placement?: "center" | "top" | "bottom" | "left" | "right";
+      offset?: number;
+    }
+  | {
+      v: number;
+      id: string;
+      op: "create_arrow_between_targets";
+      from: BoardTargetRef;
+      to: BoardTargetRef;
+      label?: string;
+    };
+
+type CreateShapeInput = Parameters<Editor["createShape"]>[0];
+
+type PageRect = { x: number; y: number; w: number; h: number };
+
+type BoardTargetState = {
+  lastPointerPagePoint: { x: number; y: number } | null;
+  pointerShapeId: string | null;
+  thisShapeId: string | null;
+  thatShapeId: string | null;
 };
+
+function updateFocusHistory(state: BoardTargetState, shapeId: string | null) {
+  if (!shapeId || state.thisShapeId === shapeId) {
+    return;
+  }
+
+  state.thatShapeId = state.thisShapeId;
+  state.thisShapeId = shapeId;
+}
+
+function getShapeBounds(editor: Editor, shapeId: string): PageRect | null {
+  const shape = editor.getShape(shapeId);
+  if (!shape) return null;
+
+  const bounds = editor.getShapePageBounds(shape);
+  if (!bounds) return null;
+
+  return { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h };
+}
+
+function getRectCenter(rect: PageRect): { x: number; y: number } {
+  return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+}
+
+function getEdgePointTowards(rect: PageRect, towards: { x: number; y: number }) {
+  const center = getRectCenter(rect);
+  const dx = towards.x - center.x;
+  const dy = towards.y - center.y;
+
+  if (Math.abs(dx) < 1e-5 && Math.abs(dy) < 1e-5) {
+    return center;
+  }
+
+  const scaleX = dx === 0 ? Number.POSITIVE_INFINITY : (rect.w / 2) / Math.abs(dx);
+  const scaleY = dy === 0 ? Number.POSITIVE_INFINITY : (rect.h / 2) / Math.abs(dy);
+  const t = Math.min(scaleX, scaleY);
+
+  return {
+    x: center.x + dx * t,
+    y: center.y + dy * t,
+  };
+}
+
+function getPlacementPoint(
+  rect: PageRect,
+  placement: "center" | "top" | "bottom" | "left" | "right",
+  offset: number
+) {
+  const center = getRectCenter(rect);
+
+  switch (placement) {
+    case "center":
+      return center;
+    case "top":
+      return { x: center.x, y: rect.y - offset };
+    case "bottom":
+      return { x: center.x, y: rect.y + rect.h + offset };
+    case "left":
+      return { x: rect.x - offset, y: center.y };
+    case "right":
+      return { x: rect.x + rect.w + offset, y: center.y };
+    default:
+      return { x: center.x, y: rect.y - offset };
+  }
+}
+
+function resolveTargetShapeId(
+  editor: Editor,
+  target: BoardTargetRef,
+  targetState: BoardTargetState
+): string | null {
+  switch (target.kind) {
+    case "shape_id":
+      return editor.getShape(target.shapeId) ? target.shapeId : null;
+    case "selection": {
+      const selection = editor.getSelectedShapeIds();
+      if (selection.length === 0) return null;
+      const index =
+        typeof target.index === "number" && Number.isInteger(target.index)
+          ? Math.max(0, Math.min(target.index, selection.length - 1))
+          : 0;
+      return selection[index] ?? null;
+    }
+    case "pointer": {
+      if (targetState.pointerShapeId && editor.getShape(targetState.pointerShapeId)) {
+        return targetState.pointerShapeId;
+      }
+
+      const pointer = targetState.lastPointerPagePoint;
+      if (!pointer) return null;
+      const hit = editor.getShapeAtPoint(pointer, {
+        hitInside: true,
+        hitLabels: true,
+        renderingOnly: true,
+      });
+      return hit?.id ?? null;
+    }
+    case "this":
+      return targetState.thisShapeId && editor.getShape(targetState.thisShapeId)
+        ? targetState.thisShapeId
+        : null;
+    case "that":
+      return targetState.thatShapeId && editor.getShape(targetState.thatShapeId)
+        ? targetState.thatShapeId
+        : null;
+    default:
+      return null;
+  }
+}
 
 function getBoardMetrics(editor: Editor | null): BoardMetrics {
   if (!editor) {
@@ -99,15 +260,433 @@ function getBoardMetrics(editor: Editor | null): BoardMetrics {
   };
 }
 
+function applyBoardCommand(
+  editor: Editor,
+  command: BoardCommand,
+  targetState: BoardTargetState
+): void {
+  try {
+    switch (command.op) {
+      case "create_text": {
+        if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) {
+          console.warn("Skipping invalid text command", command);
+          break;
+        }
+
+        editor.createShape({
+          type: "text",
+          x: command.x,
+          y: command.y,
+          props: {
+            richText: toRichText(command.text),
+          },
+        } as unknown as CreateShapeInput);
+        break;
+      }
+      case "create_text_near_selection": {
+        const bounds = editor.getSelectionPageBounds();
+        if (!bounds) {
+          console.warn("Skipping create_text_near_selection with no selection", command);
+          break;
+        }
+
+        const offsetX =
+          typeof command.offsetX === "number" && Number.isFinite(command.offsetX)
+            ? command.offsetX
+            : 0;
+        const offsetY =
+          typeof command.offsetY === "number" && Number.isFinite(command.offsetY)
+            ? command.offsetY
+            : 0;
+        const anchorX = bounds.x + bounds.w / 2 + offsetX;
+        const anchorY = bounds.y + bounds.h / 2 + offsetY;
+
+        editor.createShape({
+          type: "text",
+          x: anchorX,
+          y: anchorY,
+          props: {
+            richText: toRichText(command.text),
+          },
+        } as unknown as CreateShapeInput);
+        break;
+      }
+      case "create_geo": {
+        if (
+          !Number.isFinite(command.x) ||
+          !Number.isFinite(command.y) ||
+          !Number.isFinite(command.w) ||
+          !Number.isFinite(command.h)
+        ) {
+          console.warn("Skipping invalid geo command", command);
+          break;
+        }
+
+        editor.createShape({
+          type: "geo",
+          x: command.x,
+          y: command.y,
+          props: {
+            geo: command.geo,
+            w: Math.max(command.w, 40),
+            h: Math.max(command.h, 40),
+            richText: toRichText(command.label ?? ""),
+          },
+        } as unknown as CreateShapeInput);
+        break;
+      }
+      case "create_arrow": {
+        const dx = command.toX - command.x;
+        const dy = command.toY - command.y;
+        if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+          console.warn("Skipping invalid arrow command", command);
+          break;
+        }
+
+        editor.createShape({
+          type: "arrow",
+          x: command.x,
+          y: command.y,
+          props: {
+            start: { x: 0, y: 0 },
+            end: { x: dx, y: dy },
+            richText: toRichText(""),
+          },
+        } as unknown as CreateShapeInput);
+        break;
+      }
+      case "create_text_on_target": {
+        const targetShapeId = resolveTargetShapeId(editor, command.target, targetState);
+        if (!targetShapeId) {
+          console.warn("Skipping create_text_on_target, unresolved target", command);
+          break;
+        }
+
+        const targetBounds = getShapeBounds(editor, targetShapeId);
+        if (!targetBounds) {
+          console.warn("Skipping create_text_on_target, missing target bounds", command);
+          break;
+        }
+
+        updateFocusHistory(targetState, targetShapeId);
+
+        const placement = command.placement ?? "top";
+        const offset =
+          typeof command.offset === "number" && Number.isFinite(command.offset)
+            ? Math.max(0, command.offset)
+            : 24;
+        const anchor = getPlacementPoint(targetBounds, placement, offset);
+
+        editor.createShape({
+          type: "text",
+          x: anchor.x,
+          y: anchor.y,
+          props: {
+            richText: toRichText(command.text),
+          },
+        } as unknown as CreateShapeInput);
+        break;
+      }
+      case "create_arrow_between_targets": {
+        const fromShapeId = resolveTargetShapeId(editor, command.from, targetState);
+        const toShapeId = resolveTargetShapeId(editor, command.to, targetState);
+
+        if (!fromShapeId || !toShapeId) {
+          console.warn("Skipping create_arrow_between_targets, unresolved target", command);
+          break;
+        }
+
+        const fromBounds = getShapeBounds(editor, fromShapeId);
+        const toBounds = getShapeBounds(editor, toShapeId);
+
+        if (!fromBounds || !toBounds) {
+          console.warn("Skipping create_arrow_between_targets, missing target bounds", command);
+          break;
+        }
+
+        updateFocusHistory(targetState, fromShapeId);
+        updateFocusHistory(targetState, toShapeId);
+
+        const fromCenter = getRectCenter(fromBounds);
+        const toCenter = getRectCenter(toBounds);
+        const start = getEdgePointTowards(fromBounds, toCenter);
+        const end = getEdgePointTowards(toBounds, fromCenter);
+        const dx = end.x - start.x;
+        const dy = end.y - start.y;
+
+        editor.createShape({
+          type: "arrow",
+          x: start.x,
+          y: start.y,
+          props: {
+            start: { x: 0, y: 0 },
+            end: { x: dx, y: dy },
+            richText: toRichText(""),
+          },
+        } as unknown as CreateShapeInput);
+
+        if (command.label) {
+          editor.createShape({
+            type: "text",
+            x: start.x + dx / 2,
+            y: start.y + dy / 2 - 16,
+            props: {
+              richText: toRichText(command.label),
+            },
+          } as unknown as CreateShapeInput);
+        }
+        break;
+      }
+      default:
+        console.warn("Unsupported board command", command);
+    }
+  } catch (error) {
+    console.error("Error applying board command:", error, command);
+  }
+}
+
+function mapPagePointToVideo(
+  pagePoint: { x: number; y: number },
+  pageBounds: PageRect,
+  padding: number,
+  targetRect: { x: number; y: number; w: number; h: number }
+): { x: number; y: number } {
+  const exportW = Math.max(pageBounds.w + padding * 2, 1);
+  const exportH = Math.max(pageBounds.h + padding * 2, 1);
+  const px = (pagePoint.x - pageBounds.x + padding) * (targetRect.w / exportW);
+  const py = (pagePoint.y - pageBounds.y + padding) * (targetRect.h / exportH);
+  return {
+    x: targetRect.x + px,
+    y: targetRect.y + py,
+  };
+}
+
+function CanvasVideoPublisher({
+  isConnected,
+  editor,
+}: {
+  isConnected: boolean;
+  editor: Editor | null;
+}) {
+  const room = useRoomContext();
+  const timerRef = useRef<number | null>(null);
+  const localVideoTrackRef = useRef<LocalVideoTrack | null>(null);
+
+  useEffect(() => {
+    if (!isConnected || !editor) return;
+
+    let cancelled = false;
+
+    const offscreenCanvas = document.createElement("canvas");
+    offscreenCanvas.width = 1280;
+    offscreenCanvas.height = 720;
+    const drawCtx = offscreenCanvas.getContext("2d");
+
+    if (!drawCtx) {
+      console.error("Unable to create offscreen canvas context for board video");
+      return;
+    }
+
+    drawCtx.fillStyle = "#0b1220";
+    drawCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+    const stream = offscreenCanvas.captureStream(2);
+    const mediaTrack = stream.getVideoTracks()[0];
+
+    if (!mediaTrack) {
+      console.error("No media track produced from board capture stream");
+      return;
+    }
+
+    const localVideoTrack = new LocalVideoTrack(mediaTrack);
+    localVideoTrackRef.current = localVideoTrack;
+
+    void room.localParticipant
+      .publishTrack(localVideoTrack, {
+        source: Track.Source.Camera,
+        simulcast: false,
+      })
+      .then(() => {
+        console.log("Published live board video track");
+      })
+      .catch((error) => {
+        console.error("Failed to publish board video track", error);
+      });
+
+    const renderBoardFrame = async () => {
+      try {
+        const pageShapeIds = [...editor.getCurrentPageShapeIds()];
+        const exportPadding = 64;
+        const imageResult = await editor.toImage(pageShapeIds, {
+          format: "png",
+          background: true,
+          preserveAspectRatio: "contain",
+          padding: exportPadding,
+          scale: 1,
+        });
+
+        if (cancelled) return;
+
+        const bitmap = await createImageBitmap(imageResult.blob);
+        drawCtx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        drawCtx.fillStyle = "#0b1220";
+        drawCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+        const scale = Math.min(
+          offscreenCanvas.width / bitmap.width,
+          offscreenCanvas.height / bitmap.height
+        );
+        const targetW = bitmap.width * scale;
+        const targetH = bitmap.height * scale;
+        const targetX = (offscreenCanvas.width - targetW) / 2;
+        const targetY = (offscreenCanvas.height - targetH) / 2;
+
+        drawCtx.drawImage(bitmap, targetX, targetY, targetW, targetH);
+
+        const pageBounds = editor.getCurrentPageBounds();
+        if (pageBounds) {
+          const normalizedBounds: PageRect = {
+            x: pageBounds.x,
+            y: pageBounds.y,
+            w: pageBounds.w,
+            h: pageBounds.h,
+          };
+
+          const targetRect = { x: targetX, y: targetY, w: targetW, h: targetH };
+
+          const selection = editor.getSelectionPageBounds();
+          if (selection) {
+            const topLeft = mapPagePointToVideo(
+              { x: selection.x, y: selection.y },
+              normalizedBounds,
+              exportPadding,
+              targetRect
+            );
+            const bottomRight = mapPagePointToVideo(
+              { x: selection.x + selection.w, y: selection.y + selection.h },
+              normalizedBounds,
+              exportPadding,
+              targetRect
+            );
+
+            drawCtx.save();
+            drawCtx.strokeStyle = "#22d3ee";
+            drawCtx.lineWidth = 3;
+            drawCtx.setLineDash([10, 6]);
+            drawCtx.strokeRect(
+              topLeft.x,
+              topLeft.y,
+              Math.max(1, bottomRight.x - topLeft.x),
+              Math.max(1, bottomRight.y - topLeft.y)
+            );
+            drawCtx.restore();
+          }
+
+          const pointer = editor.inputs.getCurrentPagePoint();
+          const pointerVideo = mapPagePointToVideo(
+            { x: pointer.x, y: pointer.y },
+            normalizedBounds,
+            exportPadding,
+            targetRect
+          );
+
+          drawCtx.save();
+          drawCtx.fillStyle = "#f97316";
+          drawCtx.beginPath();
+          drawCtx.arc(pointerVideo.x, pointerVideo.y, 7, 0, Math.PI * 2);
+          drawCtx.fill();
+          drawCtx.strokeStyle = "#fff";
+          drawCtx.lineWidth = 2;
+          drawCtx.stroke();
+          drawCtx.restore();
+        }
+
+        bitmap.close();
+      } catch (error) {
+        console.error("Failed to render board video frame", error);
+      }
+    };
+
+    void renderBoardFrame();
+    timerRef.current = window.setInterval(() => {
+      void renderBoardFrame();
+    }, 200);
+
+    return () => {
+      cancelled = true;
+
+      if (timerRef.current) {
+        window.clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+
+      const localTrack = localVideoTrackRef.current;
+      localVideoTrackRef.current = null;
+
+      if (localTrack) {
+        void room.localParticipant.unpublishTrack(localTrack);
+        localTrack.stop();
+      }
+
+      stream.getTracks().forEach((track) => track.stop());
+    };
+  }, [editor, isConnected, room]);
+
+  return null; // This component has no UI
+}
+
+function BoardCommandBridge({
+  isConnected,
+  editor,
+  targetStateRef,
+}: {
+  isConnected: boolean;
+  editor: Editor | null;
+  targetStateRef: { current: BoardTargetState };
+}) {
+  const room = useRoomContext();
+
+  useEffect(() => {
+    if (!isConnected || !editor) return;
+
+    const onDataReceived = (
+      payload: Uint8Array,
+      _participant?: unknown,
+      _kind?: unknown,
+      topic?: string
+    ) => {
+      if (topic !== "board.command") return;
+
+      try {
+        const command = JSON.parse(
+          new TextDecoder().decode(payload)
+        ) as BoardCommand;
+        applyBoardCommand(editor, command, targetStateRef.current);
+      } catch (error) {
+        console.error("Failed to apply board command", error);
+      }
+    };
+
+    room.on("dataReceived", onDataReceived);
+    return () => {
+      room.off("dataReceived", onDataReceived);
+    };
+  }, [editor, isConnected, room, targetStateRef]);
+
+  return null;
+}
+
 export function TabloWorkspace() {
   const [editor, setEditor] = useState<Editor | null>(null);
+  const targetStateRef = useRef<BoardTargetState>({
+    lastPointerPagePoint: null,
+    pointerShapeId: null,
+    thisShapeId: null,
+    thatShapeId: null,
+  });
   const [session, setSession] = useState<SessionBootstrap | null>(null);
   const [boardMetrics, setBoardMetrics] = useState<BoardMetrics>(() =>
     getBoardMetrics(null)
-  );
-  const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
-  const [syncState, setSyncState] = useState<"idle" | "syncing" | "synced">(
-    "idle"
   );
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading"
@@ -125,7 +704,6 @@ export function TabloWorkspace() {
     token?: string;
   } | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
-  const syncTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,62 +772,58 @@ export function TabloWorkspace() {
 
     const removeListener = editor.store.listen(
       () => {
-        const nextMetrics = getBoardMetrics(editor);
-        setBoardMetrics(nextMetrics);
-
-        if (!session) {
-          return;
-        }
-
-        if (syncTimeoutRef.current) {
-          window.clearTimeout(syncTimeoutRef.current);
-        }
-
-        setSyncState("syncing");
-        syncTimeoutRef.current = window.setTimeout(async () => {
-          try {
-            const res = await fetch(`${API_BASE_URL}/board/snapshot`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                session_id: session.session_id,
-                summary: nextMetrics.summary,
-                shape_count: nextMetrics.shapeCount,
-                selected_count: nextMetrics.selectedCount,
-              }),
-            });
-
-            if (!res.ok) {
-              throw new Error(
-                `Board snapshot failed with status ${res.status}`
-              );
-            }
-
-            const data = (await res.json()) as BoardSnapshot;
-            setSnapshot(data);
-            setSyncState("synced");
-          } catch (error) {
-            setSyncState("idle");
-            setErrorMessage(
-              error instanceof Error
-                ? error.message
-                : "Something went wrong while syncing the board."
-            );
-          }
-        }, 350);
+        setBoardMetrics(getBoardMetrics(editor));
+        // The Gemini model now sees the board through published PNG snapshots.
       },
       { source: "user", scope: "document" }
     );
 
     return () => {
-      if (syncTimeoutRef.current) {
-        window.clearTimeout(syncTimeoutRef.current);
-      }
       removeListener();
     };
   }, [editor, session]);
+
+  useEffect(() => {
+    if (!editor) return;
+
+    const targetState = targetStateRef.current;
+
+    const updateFromSelection = () => {
+      const selected = editor.getSelectedShapeIds();
+      if (selected.length > 0) {
+        updateFocusHistory(targetState, selected[0] ?? null);
+      }
+    };
+
+    const removeSelectionListener = editor.store.listen(
+      () => {
+        updateFromSelection();
+      },
+      { source: "user", scope: "document" }
+    );
+
+    updateFromSelection();
+
+    const interval = window.setInterval(() => {
+      const pointer = editor.inputs.getCurrentPagePoint();
+      targetState.lastPointerPagePoint = { x: pointer.x, y: pointer.y };
+
+      const hoverShape = editor.getShapeAtPoint(pointer, {
+        hitInside: true,
+        hitLabels: true,
+        renderingOnly: true,
+      });
+
+      const hoverId = hoverShape?.id ?? null;
+      targetState.pointerShapeId = hoverId;
+      updateFocusHistory(targetState, hoverId);
+    }, 120);
+
+    return () => {
+      removeSelectionListener();
+      window.clearInterval(interval);
+    };
+  }, [editor]);
 
   async function connectLiveKit() {
     if (!session || !realtimeConfig?.configured) {
@@ -316,6 +890,12 @@ export function TabloWorkspace() {
       }}
     >
       <RoomAudioRenderer />
+      <CanvasVideoPublisher isConnected={roomState === "connected"} editor={editor} />
+      <BoardCommandBridge
+        isConnected={roomState === "connected"}
+        editor={editor}
+        targetStateRef={targetStateRef}
+      />
       <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50">
         <div className="relative flex min-h-screen flex-col">
 
@@ -333,8 +913,8 @@ export function TabloWorkspace() {
               </p>
               <p className="mt-3 text-sm leading-6 text-slate-300">
                 This shell is now aligned with the actual product direction:
-                LiveKit for room transport, backend-issued tokens, and backend
-                audio conversion before Gemini Live.
+                LiveKit for room transport, backend-issued tokens, and live
+                vision input before Gemini Live.
               </p>
             </div>
 
@@ -360,13 +940,10 @@ export function TabloWorkspace() {
                     <p className="mt-1">{session.backend_status}</p>
                   </div>
                   <div>
-                    <p className="font-medium text-white">Board sync</p>
+                    <p className="font-medium text-white">Vision feed</p>
                     <p className="mt-1">
-                      {syncState === "syncing"
-                        ? "Syncing board changes to backend..."
-                        : snapshot
-                          ? `Last synced at ${new Date(snapshot.synced_at).toLocaleTimeString()}`
-                          : "Waiting for first board change."}
+                      The board is streamed as a live video track into the room
+                      so Gemini receives ongoing visual context.
                     </p>
                   </div>
                   <div>

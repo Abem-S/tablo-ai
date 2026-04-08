@@ -594,14 +594,16 @@ This should read as an execution plan for the architecture above, not just as a 
 
 What shipped:
 
-- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room with `AutoSubscribe.AUDIO_ONLY`, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (Gemini's native speech-to-speech model), starts an `AgentSession` with `await session.start(agent=Agent(...), room=ctx.room)`, and greets the learner via `await session.generate_reply()`.
+- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (Gemini's native speech-to-speech model), starts an `AgentSession` with `await session.start(agent=Agent(...), room=ctx.room, room_options=room_io.RoomOptions(video_input=True))`, and greets the learner via `await session.generate_reply()`.
 - **`backend/main.py`** — `/livekit/token` endpoint issues a signed participant JWT and dispatches the `tablo-assistant` agent to the room on demand via `livekit_api.agent_dispatch.create_dispatch`.
 - **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects using the backend-issued token. `RoomAudioRenderer` plays AI voice audio. `VoiceAssistantControlBar` appears in the bottom bar when connected.
-- **Live board sync** — board shapes debounced and synced to `/board/snapshot` in real time, giving the AI board awareness.
+- **Live board vision feed** — the frontend exports the `tldraw` page into PNG frames and publishes an offscreen-canvas video track into the LiveKit room, giving Gemini ongoing visual context.
+- **Deterministic board drawing** — the agent emits `board.command` events and the frontend applies them directly to `tldraw`.
+- **Target-aware drawing** — current command family supports absolute commands (`create_text`, `create_geo`, `create_arrow`) plus target-aware commands (`create_text_on_target`, `create_arrow_between_targets`) that resolve targets from selection, pointer, this/that references, or explicit `shape:<id>` refs.
 - **Key env vars:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`. The plugin reads `GOOGLE_API_KEY` specifically — `GEMINI_API_KEY` alone is not picked up.
 - **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. The correct name for a standard Gemini API key is `gemini-2.5-flash-native-audio-preview-12-2025`.
 
-**End of Day 2 result:** a learner can open the board, click Connect, and have a real-time voice conversation with a Gemini-powered Socratic tutor — all over LiveKit WebRTC, with no browser speech hacks.
+**End of Day 2 result:** a learner can open the board, click Connect, and have a real-time voice conversation with a Gemini-powered Socratic tutor, while the model sees a live board vision feed and can draw with deterministic, target-aware board commands.
 
 ### Week 2: Socratic Interaction and Live Tutor Layer
 
