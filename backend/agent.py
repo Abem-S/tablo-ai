@@ -21,14 +21,15 @@ class TabloAgent(Agent):
     def __init__(self, room):
         super().__init__(
             instructions=(
-                "You are Tablo, a Socratic voice assistant for a collaborative learning "
-                "whiteboard. Help learners reason step by step by asking guiding questions. "
-                "You can see the board through live video. When explaining visual ideas, "
-                "draw incrementally while you talk by calling board tools. Keep responses concise "
-                "for voice and avoid dumping too many shapes at once. When placing labels or arrows, "
-                "prefer target-anchored tools so marks land on the intended shape. You can target "
-                "selection, pointer, this/that references, or explicit shape IDs. If references are "
-                "ambiguous, ask a short clarification question before drawing."
+                "You are Tablo, a voice assistant for a collaborative learning whiteboard. "
+                "IMPORTANT: You MUST use the execute_command tool to draw anything on the board. "
+                "Never just say you drew something - you must actually call the execute_command tool. "
+                "The tool takes a JSON command string. Examples: "
+                '{"v":1,"id":"123","op":"create_geo","geo":"triangle","x":100,"y":100,"w":80,"h":80} '
+                "to draw a triangle, or "
+                '{"v":1,"id":"124","op":"create_text","text":"Hello","x":50,"y":50} '
+                "to draw text. "
+                "Keep responses short for voice. When you need to draw, call execute_command with the appropriate JSON."
             )
         )
         self._room = room
@@ -40,6 +41,74 @@ class TabloAgent(Agent):
             reliable=True,
             topic="board.command",
         )
+
+    @function_tool()
+    async def execute_command(
+        self,
+        context: RunContext,
+        command_json: str,
+    ) -> str:
+        """Execute any board command directly. Send a JSON command to the board.
+
+        Args:
+            command_json: Complete JSON command object as a string.
+
+        IMPORTANT - Geo types mapping (use these EXACT values):
+            - For CIRCLE use: "ellipse" (NOT "circle")
+            - For BOX/SQUARE use: "rectangle" (NOT "box" or "square")
+            - For RIGHT TRIANGLE use: "triangle" (NOT "right_triangle")
+            - Valid geo types: "rectangle", "ellipse", "triangle", "diamond", "pentagon", "hexagon", "octagon", "star", "rhombus", "oval", "trapezoid"
+            - For arrows, use the create_arrow command NOT create_geo
+
+        IMPORTANT - For 3D shapes or complex shapes:
+            - Use create_freehand command to draw freehand strokes
+            - The AI can draw ANYTHING using freehand - this is the most flexible option
+            - Example freehand: {"v":1,"id":"uuid","op":"create_freehand","points":[{"x":0,"y":0},{"x":50,"y":50},{"x":100,"y":0}]}
+
+        Examples:
+            - Draw circle: {"v":1,"id":"uuid","op":"create_geo","geo":"ellipse","x":100,"y":100,"w":80,"h":80}
+            - Draw triangle: {"v":1,"id":"uuid","op":"create_geo","geo":"triangle","x":100,"y":100,"w":80,"h":80}
+            - Draw text: {"v":1,"id":"uuid","op":"create_text","text":"Hello","x":50,"y":50}
+            - Draw arrow: {"v":1,"id":"uuid","op":"create_arrow","x":0,"y":0,"toX":100,"toY":100}
+            - Draw freehand (any shape): {"v":1,"id":"uuid","op":"create_freehand","points":[{"x":0,"y":0},{"x":25,"y":50},{"x":50,"y":25}]}
+            - Clear board: {"v":1,"id":"uuid","op":"clear_board"}
+
+        Supported operations (op values):
+            - create_text: Draw text at x,y
+            - create_geo: Draw geometric shapes (geo: rectangle, ellipse, triangle, diamond, pentagon, hexagon, octagon)
+            - create_arrow: Draw arrow from x,y to toX,toY
+            - create_text_on_target: Draw text relative to a target shape
+            - create_arrow_between_targets: Draw arrow between two target shapes
+            - create_freehand: Draw freehand strokes (points array)
+            - create_3d_cube, create_3d_cylinder, create_3d_cone, create_3d_pyramid, create_3d_prism: Draw 3D shapes
+            - create_formula: Draw math formulas (supports ^ superscript, _ subscript, sqrt(), Greek letters)
+            - create_multiline_text: Draw multiple lines of text
+            - create_side_label: Label a side of a shape (side: normal/inverted/side-inverted)
+            - clear_board: Clear all shapes
+            - clear_shapes: Clear specific shapes by ID
+            - clear_region: Clear shapes in a region
+            - get_board_state: Get info about what's on the board
+            - get_shape_info: Get info about a specific shape
+            - match_shapes: Find shapes by properties
+            - get_position_info: Get board position info
+            - calculate_position: Calculate position relative to a shape
+            - snap_to_grid: Snap coordinates to grid
+            - align_shapes: Align two shapes
+            - place_with_collision_check: Place shape with collision detection
+        """
+        try:
+            command = json.loads(command_json)
+            # Ensure version and id fields
+            if "v" not in command:
+                command["v"] = 1
+            if "id" not in command:
+                command["id"] = str(uuid4())
+            logger.info(f"Publishing board command: {command.get('op')} - {command}")
+            await self._publish_board_command(command)
+            return f"command executed: {command.get('op', 'unknown')}"
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in execute_command: {e}")
+            return f"Error: Invalid JSON - {str(e)}"
 
     def _target_ref(self, target: str) -> dict:
         raw_target = (target or "selection").strip()
@@ -55,221 +124,6 @@ class TabloAgent(Agent):
             return {"kind": "shape_id", "shapeId": raw_target[6:]}
 
         return {"kind": "selection"}
-
-    @function_tool()
-    async def draw_text(
-        self,
-        context: RunContext,
-        text: str,
-        x: float,
-        y: float,
-    ) -> str:
-        """Draw short text at board coordinates.
-
-        Args:
-            text: Text label to draw.
-            x: X position in board space.
-            y: Y position in board space.
-        """
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_text",
-            "text": text,
-            "x": x,
-            "y": y,
-        }
-        await self._publish_board_command(command)
-        return "text drawn"
-
-    @function_tool()
-    async def draw_box(
-        self,
-        context: RunContext,
-        x: float,
-        y: float,
-        w: float,
-        h: float,
-        label: str = "",
-    ) -> str:
-        """Draw a rectangular box with an optional label.
-
-        Args:
-            x: Left position in board space.
-            y: Top position in board space.
-            w: Width of the rectangle.
-            h: Height of the rectangle.
-            label: Optional text shown inside the shape.
-        """
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_geo",
-            "geo": "rectangle",
-            "x": x,
-            "y": y,
-            "w": w,
-            "h": h,
-            "label": label,
-        }
-        await self._publish_board_command(command)
-        return "box drawn"
-
-    @function_tool()
-    async def draw_text_near_selection(
-        self,
-        context: RunContext,
-        text: str,
-        offset_x: float = 0.0,
-        offset_y: float = 0.0,
-    ) -> str:
-        """Draw text anchored to the center of the currently selected shape(s).
-
-        Ask the learner to select the target shape first for precise placement.
-
-        Args:
-            text: Label text to place.
-            offset_x: Horizontal offset from selection center.
-            offset_y: Vertical offset from selection center.
-        """
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_text_near_selection",
-            "text": text,
-            "offsetX": offset_x,
-            "offsetY": offset_y,
-        }
-        await self._publish_board_command(command)
-        return "selection-anchored text drawn"
-
-    @function_tool()
-    async def draw_text_on_target(
-        self,
-        context: RunContext,
-        text: str,
-        target: str = "selection",
-        placement: str = "top",
-        offset: float = 24.0,
-    ) -> str:
-        """Draw text relative to a target shape.
-
-        Supported target values:
-            - selection (currently selected shape)
-            - pointer (shape under latest pointer)
-            - this, that (recently referenced shapes)
-            - shape:<shape-id> (explicit shape id)
-
-        Args:
-            text: Label text to place.
-            target: Target reference token.
-            placement: One of center, top, bottom, left, right.
-            offset: Extra distance from target anchor, in board units.
-        """
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_text_on_target",
-            "text": text,
-            "target": self._target_ref(target),
-            "placement": placement,
-            "offset": float(offset),
-        }
-        await self._publish_board_command(command)
-        return "target-anchored text drawn"
-
-    @function_tool()
-    async def draw_circle(
-        self,
-        context: RunContext,
-        x: float,
-        y: float,
-        diameter: float,
-        label: str = "",
-    ) -> str:
-        """Draw a circle (implemented as an ellipse with equal width/height).
-
-        Args:
-            x: Left position in board space.
-            y: Top position in board space.
-            diameter: Circle diameter.
-            label: Optional text shown inside the circle.
-        """
-        d = max(diameter, 24.0)
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_geo",
-            "geo": "ellipse",
-            "x": x,
-            "y": y,
-            "w": d,
-            "h": d,
-            "label": label,
-        }
-        await self._publish_board_command(command)
-        return "circle drawn"
-
-    @function_tool()
-    async def draw_arrow(
-        self,
-        context: RunContext,
-        x: float,
-        y: float,
-        to_x: float,
-        to_y: float,
-    ) -> str:
-        """Draw an arrow from one board point to another.
-
-        Args:
-            x: Start x in board space.
-            y: Start y in board space.
-            to_x: End x in board space.
-            to_y: End y in board space.
-        """
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_arrow",
-            "x": x,
-            "y": y,
-            "toX": to_x,
-            "toY": to_y,
-        }
-        await self._publish_board_command(command)
-        return "arrow drawn"
-
-    @function_tool()
-    async def draw_arrow_between_targets(
-        self,
-        context: RunContext,
-        from_target: str = "this",
-        to_target: str = "that",
-        label: str = "",
-    ) -> str:
-        """Draw an arrow between two target shapes.
-
-        Supported target values:
-            - selection
-            - pointer
-            - this, that
-            - shape:<shape-id>
-
-        Args:
-            from_target: Source target token.
-            to_target: Destination target token.
-            label: Optional text near the arrow midpoint.
-        """
-        command = {
-            "v": 1,
-            "id": str(uuid4()),
-            "op": "create_arrow_between_targets",
-            "from": self._target_ref(from_target),
-            "to": self._target_ref(to_target),
-            "label": label,
-        }
-        await self._publish_board_command(command)
-        return "target-anchored arrow drawn"
 
 
 async def entrypoint(ctx: JobContext):
