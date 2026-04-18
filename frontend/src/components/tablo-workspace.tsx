@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Tldraw, type Editor, type TLShapeId } from "tldraw";
+import { Tldraw, type Editor, type TLShapeId, b64Vecs, createShapeId } from "tldraw";
+import { svgShapeUtils } from "./SvgShape";
 import { toRichText } from "@tldraw/tlschema";
 import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar, useRoomContext } from "@livekit/components-react";
 import { LocalVideoTrack, Track } from "livekit-client";
+import { create as createMathScope, evaluate as mathEvaluate } from "mathjs";
 import "@livekit/components-styles";
 
 const API_BASE_URL =
@@ -237,102 +239,77 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
       break;
     }
       
-    case "create_3d_cube": {
-      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y) || !Number.isFinite(cmd.size)) {
+    case "create_svg": {
+      if (!cmd.svg || typeof cmd.svg !== "string") {
         return { 
           valid: false, 
           error: { 
             code: "VALIDATION_FAILED", 
-            message: "Invalid cube parameters: x, y, size must be finite numbers",
-            details: { x: cmd.x, y: cmd.y, size: cmd.size }
+            message: "SVG content must be a non-empty string",
+            details: { svg: cmd.svg }
           } 
         };
       }
-      if (cmd.size <= 0) {
+      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y)) {
         return { 
           valid: false, 
           error: { 
             code: "VALIDATION_FAILED", 
-            message: "Cube size must be positive",
-            details: { size: cmd.size }
-          } 
-        };
-      }
-      break;
-    }
-      
-    case "create_3d_prism": {
-      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y) || 
-          !Number.isFinite(cmd.width) || !Number.isFinite(cmd.height) || !Number.isFinite(cmd.depth)) {
-        return { 
-          valid: false, 
-          error: { 
-            code: "VALIDATION_FAILED", 
-            message: "Invalid prism parameters: all dimensions must be finite numbers",
-            details: { x: cmd.x, y: cmd.y, width: cmd.width, height: cmd.height, depth: cmd.depth }
-          } 
-        };
-      }
-      if (cmd.width <= 0 || cmd.height <= 0 || cmd.depth <= 0) {
-        return { 
-          valid: false, 
-          error: { 
-            code: "VALIDATION_FAILED", 
-            message: "Prism dimensions must be positive",
-            details: { width: cmd.width, height: cmd.height, depth: cmd.depth }
+            message: "Invalid coordinates: x and y must be finite numbers",
+            details: { x: cmd.x, y: cmd.y }
           } 
         };
       }
       break;
     }
-      
-    case "create_3d_cylinder":
-    case "create_3d_cone": {
-      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y) || 
-          !Number.isFinite(cmd.radius) || !Number.isFinite(cmd.height)) {
-        return { 
-          valid: false, 
-          error: { 
-            code: "VALIDATION_FAILED", 
-            message: "Invalid parameters: x, y, radius, height must be finite numbers",
-            details: { x: cmd.x, y: cmd.y, radius: cmd.radius, height: cmd.height }
-          } 
-        };
-      }
-      if (cmd.radius <= 0 || cmd.height <= 0) {
-        return { 
-          valid: false, 
-          error: { 
-            code: "VALIDATION_FAILED", 
-            message: "Radius and height must be positive",
-            details: { radius: cmd.radius, height: cmd.height }
-          } 
+
+    case "create_graph": {
+      if (!cmd.expressions || !Array.isArray(cmd.expressions) || cmd.expressions.length === 0) {
+        return {
+          valid: false,
+          error: {
+            code: "VALIDATION_FAILED",
+            message: "expressions must be a non-empty array",
+            details: { expressions: cmd.expressions },
+          },
         };
       }
       break;
     }
-      
-    case "create_3d_pyramid": {
-      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y) || 
-          !Number.isFinite(cmd.baseSize) || !Number.isFinite(cmd.height)) {
-        return { 
-          valid: false, 
-          error: { 
-            code: "VALIDATION_FAILED", 
-            message: "Invalid pyramid parameters: all parameters must be finite numbers",
-            details: { x: cmd.x, y: cmd.y, baseSize: cmd.baseSize, height: cmd.height }
-          } 
+
+    case "update_shape": {
+      if (!cmd.shapeId || typeof cmd.shapeId !== "string") {
+        return {
+          valid: false,
+          error: { code: "VALIDATION_FAILED", message: "shapeId must be a non-empty string", details: { shapeId: cmd.shapeId } },
         };
       }
-      if (cmd.baseSize <= 0 || cmd.height <= 0) {
-        return { 
-          valid: false, 
-          error: { 
-            code: "VALIDATION_FAILED", 
-            message: "Base size and height must be positive",
-            details: { baseSize: cmd.baseSize, height: cmd.height }
-          } 
+      break;
+    }
+
+    case "delete_shape": {
+      if (!cmd.shapeId || typeof cmd.shapeId !== "string") {
+        return {
+          valid: false,
+          error: { code: "VALIDATION_FAILED", message: "shapeId must be a non-empty string", details: { shapeId: cmd.shapeId } },
         };
+      }
+      break;
+    }
+
+    case "undo":
+      break;
+
+    case "create_polygon": {
+      if (!cmd.sides || cmd.sides < 3) {
+        return { valid: false, error: { code: "VALIDATION_FAILED", message: "sides must be >= 3", details: {} } };
+      }
+      break;
+    }
+
+    case "create_parametric_graph": {
+      if (!cmd.exprX || !cmd.exprY) {
+        return { valid: false, error: { code: "VALIDATION_FAILED", message: "exprX and exprY are required", details: {} } };
       }
       break;
     }
@@ -753,57 +730,54 @@ type BoardCommand =
       op: "clear_region";
       bounds: { x: number; y: number; w: number; h: number };
     }
-  // 3D Shape Commands
+  // SVG Shape Command - AI generates SVG code directly
   | {
       v: number;
       id: string;
-      op: "create_3d_cube";
+      op: "create_svg";
+      svg: string;
       x: number;
       y: number;
-      size: number;
-      labels?: Shape3DLabels;
+      w?: number;
+      h?: number;
+      color?: string;
     }
+  // Math Graph Command - frontend evaluates expressions accurately
   | {
       v: number;
       id: string;
-      op: "create_3d_prism";
-      x: number;
+      op: "create_graph";
+      expressions: Array<{
+        expr: string;       // e.g. "tan(x)", "x^2", "sin(x)/x"
+        color?: string;     // line color, defaults to a palette
+        label?: string;     // legend label
+      }>;
+      x: number;            // board position
       y: number;
-      width: number;
-      height: number;
-      depth: number;
-      type?: "rectangular" | "triangular";
-      labels?: Shape3DLabels;
+      w?: number;           // canvas width in px, default 400
+      h?: number;           // canvas height in px, default 300
+      xMin?: number;        // x-axis range, default -2*pi
+      xMax?: number;        // x-axis range, default 2*pi
+      yMin?: number;        // y-axis range, auto if omitted
+      yMax?: number;
+      title?: string;
     }
+  // Parametric Graph Command
   | {
       v: number;
       id: string;
-      op: "create_3d_cylinder";
+      op: "create_parametric_graph";
+      exprX: string;        // x = f(t), e.g. "cos(t)"
+      exprY: string;        // y = g(t), e.g. "sin(t)"
+      tMin?: number;        // parameter range, default 0
+      tMax?: number;        // parameter range, default 2*pi
       x: number;
       y: number;
-      radius: number;
-      height: number;
-      labels?: Shape3DLabels;
-    }
-  | {
-      v: number;
-      id: string;
-      op: "create_3d_cone";
-      x: number;
-      y: number;
-      radius: number;
-      height: number;
-      labels?: Shape3DLabels;
-    }
-  | {
-      v: number;
-      id: string;
-      op: "create_3d_pyramid";
-      x: number;
-      y: number;
-      baseSize: number;
-      height: number;
-      labels?: Shape3DLabels;
+      w?: number;
+      h?: number;
+      color?: string;
+      label?: string;
+      title?: string;
     }
   // Board State Commands (Req 3.1, 3.2)
   | {
@@ -901,6 +875,45 @@ type BoardCommand =
       targetShapeId: string;
       sourcePoint: AlignmentPoint;
       targetPoint: AlignmentPoint;
+    }
+  // Update existing shape — modify props without recreating
+  | {
+      v: number;
+      id: string;
+      op: "update_shape";
+      shapeId: string;           // ID from get_board_state
+      label?: string;            // update text label on geo/text shapes
+      color?: string;            // update stroke color
+      x?: number;                // move to new position
+      y?: number;
+      w?: number;                // resize
+      h?: number;
+    }
+  // Delete specific shapes by ID
+  | {
+      v: number;
+      id: string;
+      op: "delete_shape";
+      shapeId: string;
+    }
+  // Undo last action
+  | {
+      v: number;
+      id: string;
+      op: "undo";
+    }
+  // Regular polygon by math (pentagon, hexagon, star, etc.)
+  | {
+      v: number;
+      id: string;
+      op: "create_polygon";
+      sides: number;          // 3=triangle, 5=pentagon, 6=hexagon, etc.
+      x: number;              // center x
+      y: number;              // center y
+      radius: number;         // circumradius in px
+      rotation?: number;      // rotation in degrees, default 0
+      star?: boolean;         // if true, draw a star (inner radius = radius/2.5)
+      label?: string;
     };
 
 type Point = { x: number; y: number };
@@ -1551,51 +1564,6 @@ function getBoundsFromCommand(cmd: BoardCommand): PageRect | null {
         h: fMaxY - fMinY,
       };
     }
-    case "create_3d_cube": {
-      const c = cmd as typeof cmd & { op: "create_3d_cube" };
-      return {
-        x: c.x - c.size / 2,
-        y: c.y - c.size / 2,
-        w: c.size,
-        h: c.size,
-      };
-    }
-    case "create_3d_prism": {
-      const c = cmd as typeof cmd & { op: "create_3d_prism" };
-      return {
-        x: c.x - c.width / 2,
-        y: c.y - c.height / 2,
-        w: c.width,
-        h: c.height,
-      };
-    }
-    case "create_3d_cylinder": {
-      const c = cmd as typeof cmd & { op: "create_3d_cylinder" };
-      return {
-        x: c.x - c.radius,
-        y: c.y - c.height,
-        w: c.radius * 2,
-        h: c.height,
-      };
-    }
-    case "create_3d_cone": {
-      const c = cmd as typeof cmd & { op: "create_3d_cone" };
-      return {
-        x: c.x - c.radius,
-        y: c.y - c.height,
-        w: c.radius * 2,
-        h: c.height,
-      };
-    }
-    case "create_3d_pyramid": {
-      const c = cmd as typeof cmd & { op: "create_3d_pyramid" };
-      return {
-        x: c.x - c.baseSize / 2,
-        y: c.y - c.height,
-        w: c.baseSize,
-        h: c.height,
-      };
-    }
     default:
       return null;
   }
@@ -1649,36 +1617,6 @@ function modifyCommandPosition(
         x: p.x + offsetX,
         y: p.y + offsetY,
       }));
-      return c;
-    }
-    case "create_3d_cube": {
-      const c = modified as typeof modified & { op: "create_3d_cube" };
-      c.x = newPosition.x + c.size / 2;
-      c.y = newPosition.y + c.size / 2;
-      return c;
-    }
-    case "create_3d_prism": {
-      const c = modified as typeof modified & { op: "create_3d_prism" };
-      c.x = newPosition.x + c.width / 2;
-      c.y = newPosition.y + c.height / 2;
-      return c;
-    }
-    case "create_3d_cylinder": {
-      const c = modified as typeof modified & { op: "create_3d_cylinder" };
-      c.x = newPosition.x + c.radius;
-      c.y = newPosition.y + c.height;
-      return c;
-    }
-    case "create_3d_cone": {
-      const c = modified as typeof modified & { op: "create_3d_cone" };
-      c.x = newPosition.x + c.radius;
-      c.y = newPosition.y + c.height;
-      return c;
-    }
-    case "create_3d_pyramid": {
-      const c = modified as typeof modified & { op: "create_3d_pyramid" };
-      c.x = newPosition.x + c.baseSize / 2;
-      c.y = newPosition.y + c.height;
       return c;
     }
     default:
@@ -2744,6 +2682,7 @@ type BoardTargetState = {
   pointerShapeId: string | null;
   thisShapeId: string | null;
   thatShapeId: string | null;
+  lastBoardStateResponse: string | null;
 };
 
 function updateFocusHistory(state: BoardTargetState, shapeId: string | null) {
@@ -2917,6 +2856,176 @@ function getBoardMetrics(editor: Editor | null): BoardMetrics {
   };
 }
 
+// ============================================
+// Math Graph Renderer
+// Evaluates expressions accurately using mathjs,
+// then builds an SVG string for the SvgShape.
+// ============================================
+
+const GRAPH_COLORS = ["#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2"];
+
+interface GraphExpression {
+  expr: string;
+  color?: string;
+  label?: string;
+}
+
+function buildGraphSvg(
+  expressions: GraphExpression[],
+  xMin: number,
+  xMax: number,
+  yMin: number | undefined,
+  yMax: number | undefined,
+  svgW: number,
+  svgH: number,
+  title?: string
+): string {
+  const PADDING = { top: title ? 36 : 20, right: 20, bottom: 36, left: 44 };
+  const plotW = svgW - PADDING.left - PADDING.right;
+  const plotH = svgH - PADDING.top - PADDING.bottom;
+  const STEPS = 600;
+
+  // Evaluate all expressions to find y range
+  const allPoints: Array<Array<{ x: number; y: number } | null>> = [];
+
+  for (const { expr } of expressions) {
+    const pts: Array<{ x: number; y: number } | null> = [];
+    for (let i = 0; i <= STEPS; i++) {
+      const xVal = xMin + (i / STEPS) * (xMax - xMin);
+      try {
+        const yVal = mathEvaluate(expr, { x: xVal, pi: Math.PI, e: Math.E, ln: Math.log });
+        if (typeof yVal === "number" && isFinite(yVal)) {
+          pts.push({ x: xVal, y: yVal });
+        } else {
+          pts.push(null); // asymptote / undefined
+        }
+      } catch {
+        pts.push(null);
+      }
+    }
+    allPoints.push(pts);
+  }
+
+  // Auto y range if not provided
+  let computedYMin = yMin;
+  let computedYMax = yMax;
+  if (computedYMin === undefined || computedYMax === undefined) {
+    const allY = allPoints.flat().filter(Boolean).map((p) => p!.y);
+    if (allY.length === 0) {
+      computedYMin = -10;
+      computedYMax = 10;
+    } else {
+      const rawMin = Math.min(...allY);
+      const rawMax = Math.max(...allY);
+      const range = rawMax - rawMin || 1;
+      // Clamp extreme ranges (e.g. tan asymptotes)
+      const clampedMin = Math.max(rawMin, -50);
+      const clampedMax = Math.min(rawMax, 50);
+      const pad = (clampedMax - clampedMin) * 0.1 || 1;
+      computedYMin = computedYMin ?? clampedMin - pad;
+      computedYMax = computedYMax ?? clampedMax + pad;
+    }
+  }
+
+  const yRange = computedYMax - computedYMin || 1;
+  const xRange = xMax - xMin;
+
+  // Map math coords to SVG coords
+  const toSvgX = (x: number) => PADDING.left + ((x - xMin) / xRange) * plotW;
+  const toSvgY = (y: number) => PADDING.top + ((computedYMax! - y) / yRange) * plotH;
+
+  // Build axis lines
+  const axisY = toSvgY(0);
+  const axisX = toSvgX(0);
+  const clampedAxisY = Math.max(PADDING.top, Math.min(PADDING.top + plotH, axisY));
+  const clampedAxisX = Math.max(PADDING.left, Math.min(PADDING.left + plotW, axisX));
+
+  let svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 ${svgW} ${svgH}'>`;
+  svg += `<rect width='${svgW}' height='${svgH}' fill='white' rx='4'/>`;
+
+  // Title
+  if (title) {
+    svg += `<text x='${svgW / 2}' y='18' text-anchor='middle' font-size='13' font-family='sans-serif' font-weight='bold' fill='#1e293b'>${title}</text>`;
+  }
+
+  // Grid lines (light)
+  const xTicks = 8;
+  const yTicks = 6;
+  for (let i = 0; i <= xTicks; i++) {
+    const xv = xMin + (i / xTicks) * xRange;
+    const sx = toSvgX(xv);
+    svg += `<line x1='${sx}' y1='${PADDING.top}' x2='${sx}' y2='${PADDING.top + plotH}' stroke='#e2e8f0' stroke-width='1'/>`;
+    const label = Number.isInteger(xv) ? xv.toString() : xv.toFixed(1);
+    svg += `<text x='${sx}' y='${PADDING.top + plotH + 14}' text-anchor='middle' font-size='9' font-family='sans-serif' fill='#64748b'>${label}</text>`;
+  }
+  for (let i = 0; i <= yTicks; i++) {
+    const yv = computedYMin! + (i / yTicks) * yRange;
+    const sy = toSvgY(yv);
+    svg += `<line x1='${PADDING.left}' y1='${sy}' x2='${PADDING.left + plotW}' y2='${sy}' stroke='#e2e8f0' stroke-width='1'/>`;
+    const label = Number.isInteger(yv) ? yv.toString() : yv.toFixed(1);
+    svg += `<text x='${PADDING.left - 4}' y='${sy + 4}' text-anchor='end' font-size='9' font-family='sans-serif' fill='#64748b'>${label}</text>`;
+  }
+
+  // Axes
+  svg += `<line x1='${PADDING.left}' y1='${clampedAxisY}' x2='${PADDING.left + plotW}' y2='${clampedAxisY}' stroke='#334155' stroke-width='1.5'/>`;
+  svg += `<line x1='${clampedAxisX}' y1='${PADDING.top}' x2='${clampedAxisX}' y2='${PADDING.top + plotH}' stroke='#334155' stroke-width='1.5'/>`;
+  // Axis arrows
+  svg += `<polygon points='${PADDING.left + plotW},${clampedAxisY - 4} ${PADDING.left + plotW + 8},${clampedAxisY} ${PADDING.left + plotW},${clampedAxisY + 4}' fill='#334155'/>`;
+  svg += `<polygon points='${clampedAxisX - 4},${PADDING.top} ${clampedAxisX},${PADDING.top - 8} ${clampedAxisX + 4},${PADDING.top}' fill='#334155'/>`;
+  // Axis labels
+  svg += `<text x='${PADDING.left + plotW + 10}' y='${clampedAxisY + 4}' font-size='11' font-family='sans-serif' fill='#334155'>x</text>`;
+  svg += `<text x='${clampedAxisX + 4}' y='${PADDING.top - 10}' font-size='11' font-family='sans-serif' fill='#334155'>y</text>`;
+
+  // Plot each expression as a path, breaking at asymptotes (null points)
+  for (let ei = 0; ei < allPoints.length; ei++) {
+    const pts = allPoints[ei];
+    const color = expressions[ei].color ?? GRAPH_COLORS[ei % GRAPH_COLORS.length];
+    let pathD = "";
+    let inSegment = false;
+
+    for (const pt of pts) {
+      if (pt === null) {
+        inSegment = false;
+        continue;
+      }
+      const sx = toSvgX(pt.x);
+      const sy = toSvgY(pt.y);
+      // Skip points outside the plot area (clamp check)
+      if (sy < PADDING.top - 2 || sy > PADDING.top + plotH + 2) {
+        inSegment = false;
+        continue;
+      }
+      if (!inSegment) {
+        pathD += `M ${sx.toFixed(1)} ${sy.toFixed(1)} `;
+        inSegment = true;
+      } else {
+        pathD += `L ${sx.toFixed(1)} ${sy.toFixed(1)} `;
+      }
+    }
+
+    if (pathD) {
+      svg += `<path d='${pathD}' fill='none' stroke='${color}' stroke-width='2' stroke-linejoin='round' stroke-linecap='round'/>`;
+    }
+  }
+
+  // Legend
+  const legendExpressions = expressions.filter((e) => e.label || e.expr);
+  if (legendExpressions.length > 1) {
+    const legendX = PADDING.left + 8;
+    let legendY = PADDING.top + 12;
+    for (let ei = 0; ei < legendExpressions.length; ei++) {
+      const color = legendExpressions[ei].color ?? GRAPH_COLORS[ei % GRAPH_COLORS.length];
+      const label = legendExpressions[ei].label ?? legendExpressions[ei].expr;
+      svg += `<line x1='${legendX}' y1='${legendY}' x2='${legendX + 16}' y2='${legendY}' stroke='${color}' stroke-width='2'/>`;
+      svg += `<text x='${legendX + 20}' y='${legendY + 4}' font-size='10' font-family='sans-serif' fill='#1e293b'>${label}</text>`;
+      legendY += 16;
+    }
+  }
+
+  svg += `</svg>`;
+  return svg;
+}
+
 function applyBoardCommand(
   editor: Editor,
   command: BoardCommand,
@@ -2944,33 +3053,35 @@ function applyBoardCommand(
   try {
     switch (command.op) {
       case "create_text": {
-        if (!Number.isFinite(command.x) || !Number.isFinite(command.y)) {
-          console.warn("Skipping invalid text command", command);
+        const rawText = command.text;
+        if (!rawText || typeof rawText !== "string") {
+          console.warn("[create_text] Skipping — text is missing or not a string", command);
           break;
         }
 
-        // Get font size with default
-        const fontSize = typeof command.fontSize === "number" && Number.isFinite(command.fontSize)
-          ? Math.max(8, Math.min(command.fontSize, 200))
-          : undefined;
+        // Use agent coordinates if valid, otherwise viewport center
+        const vpText = editor.getViewportPageBounds();
+        const textX = Number.isFinite(command.x) ? command.x : vpText.x + vpText.w / 2 - 50;
+        const textY = Number.isFinite(command.y) ? command.y : vpText.y + vpText.h / 2;
 
-        // Get color with default
+        const fontSizeNum = typeof command.fontSize === "number" && Number.isFinite(command.fontSize)
+          ? command.fontSize : 24;
+        const textSize = fontSizeNum <= 14 ? "s" : fontSizeNum <= 24 ? "m" : fontSizeNum <= 36 ? "l" : "xl";
+
         const textColor = command.color && typeof command.color === "string" 
           ? command.color 
           : undefined;
 
         editor.createShape({
           type: "text",
-          x: command.x,
-          y: command.y,
+          x: textX,
+          y: textY,
           props: {
-            richText: toRichText(command.text),
-            ...(fontSize && { fontSize }),
+            richText: toRichText(rawText),
+            size: textSize,
             ...(textColor && { color: textColor }),
           },
         } as unknown as CreateShapeInput);
-        
-        // Track that a shape was created (we can't get the ID from the sync API)
         createdShapeIds.push("created");
         break;
       }
@@ -2991,24 +3102,23 @@ function applyBoardCommand(
           break;
         }
 
-        // Get font size with default
-        const size = typeof fontSize === "number" && Number.isFinite(fontSize)
-          ? Math.max(8, Math.min(fontSize, 200))
-          : 24;
+        // Get font size with default — map to tldraw size enum
+        const fontSizeRaw = typeof fontSize === "number" && Number.isFinite(fontSize) ? fontSize : 24;
+        const mlSize = fontSizeRaw <= 14 ? "s" : fontSizeRaw <= 24 ? "m" : fontSizeRaw <= 36 ? "l" : "xl";
 
         // Get color with default
-        const textColor = color && typeof color === "string" ? color : "#1e293b";
+        const textColor = color && typeof color === "string" ? color : "black";
 
         // Get line spacing (default 1.2x font size)
         const spacing = typeof lineSpacing === "number" && Number.isFinite(lineSpacing)
           ? lineSpacing
-          : size * 1.2;
+          : fontSizeRaw * 1.2;
 
         // Get alignment (default left)
         const align = alignment ?? "left";
 
         // Estimate character width for alignment (approximate)
-        const charWidth = size * 0.6;
+        const charWidth = fontSizeRaw * 0.6;
 
         // Create each line of text
         let createdShapeIds: string[] = [];
@@ -3035,7 +3145,7 @@ function applyBoardCommand(
             y: lineY,
             props: {
               richText: toRichText(line),
-              fontSize: size,
+              size: mlSize,
               color: textColor,
             },
           } as unknown as CreateShapeInput);
@@ -3101,13 +3211,12 @@ function applyBoardCommand(
         // Parse formula to display format
         const parsedFormula = parseFormula(formula);
 
-        // Get font size with default
-        const size = typeof fontSize === "number" && Number.isFinite(fontSize) 
-          ? Math.max(8, Math.min(fontSize, 200)) 
-          : 24;
+        // Get font size with default — map to tldraw size enum
+        const fSizeNum = typeof fontSize === "number" && Number.isFinite(fontSize) ? fontSize : 24;
+        const formulaSize = fSizeNum <= 14 ? "s" : fSizeNum <= 24 ? "m" : fSizeNum <= 36 ? "l" : "xl";
 
         // Get color with default
-        const textColor = color && typeof color === "string" ? color : "#1e293b";
+        const textColor = color && typeof color === "string" ? color : "black";
 
         const formulaShapeId = editor.createShape({
           type: "text",
@@ -3116,7 +3225,7 @@ function applyBoardCommand(
           props: {
             richText: toRichText(parsedFormula),
             color: textColor,
-            fontSize: size,
+            size: formulaSize,
           },
         } as unknown as CreateShapeInput);
         createdShapeIds.push("created");
@@ -3133,49 +3242,71 @@ function applyBoardCommand(
           break;
         }
 
-        // Map common shape names to valid tldraw geo types
+        // Convert all geo shapes to SVG for consistent rendering
         const geoType = (command.geo || "rectangle").toLowerCase();
-        const geoTypeMap: Record<string, string> = {
-          // Circle variants
-          circle: "ellipse",
-          // Rectangle variants
-          box: "rectangle",
-          square: "rectangle",
-          // Triangle variants
-          right_triangle: "triangle",
-          righttriangle: "triangle",
-          // Arrow is not a valid geo - should use create_arrow command
-          arrow: "rectangle",
-          // Handle any other invalid types
-        };
-        const validGeo = geoTypeMap[geoType] || geoType;
+        const gw = Math.max(command.w, 40);
+        const gh = Math.max(command.h, 40);
+        const label = command.label ?? "";
 
-        const geoShapeId = editor.createShape({
-          type: "geo",
-          x: command.x,
-          y: command.y,
-          props: {
-            geo: validGeo,
-            w: Math.max(command.w, 40),
-            h: Math.max(command.h, 40),
-            richText: toRichText(command.label ?? ""),
-          },
+        // Generate SVG content based on geo type
+        let geoSvg = "";
+        const stroke = "stroke='black' stroke-width='2' fill='none'";
+        switch (geoType) {
+          case "rectangle":
+          case "box":
+          case "square":
+            geoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${gw} ${gh}"><rect x="2" y="2" width="${gw - 4}" height="${gh - 4}" fill="none" stroke="black" stroke-width="2"/>${label ? `<text x="${gw / 2}" y="${gh / 2 + 5}" text-anchor="middle" font-size="14" fill="black">${label}</text>` : ""}</svg>`;
+            break;
+          case "ellipse":
+          case "circle":
+            geoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${gw} ${gh}"><ellipse cx="${gw / 2}" cy="${gh / 2}" rx="${gw / 2 - 2}" ry="${gh / 2 - 2}" fill="none" stroke="black" stroke-width="2"/>${label ? `<text x="${gw / 2}" y="${gh / 2 + 5}" text-anchor="middle" font-size="14" fill="black">${label}</text>` : ""}</svg>`;
+            break;
+          case "triangle":
+          case "right_triangle":
+          case "righttriangle":
+            geoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${gw} ${gh}"><polygon points="${gw / 2},2 ${gw - 2},${gh - 2} 2,${gh - 2}" fill="none" stroke="black" stroke-width="2"/>${label ? `<text x="${gw / 2}" y="${gh / 2 + 5}" text-anchor="middle" font-size="14" fill="black">${label}</text>` : ""}</svg>`;
+            break;
+          case "diamond":
+            geoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${gw} ${gh}"><polygon points="${gw / 2},2 ${gw - 2},${gh / 2} ${gw / 2},${gh - 2} 2,${gh / 2}" fill="none" stroke="black" stroke-width="2"/>${label ? `<text x="${gw / 2}" y="${gh / 2 + 5}" text-anchor="middle" font-size="14" fill="black">${label}</text>` : ""}</svg>`;
+            break;
+          default:
+            geoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${gw} ${gh}"><rect x="2" y="2" width="${gw - 4}" height="${gh - 4}" fill="none" stroke="black" stroke-width="2"/>${label ? `<text x="${gw / 2}" y="${gh / 2 + 5}" text-anchor="middle" font-size="14" fill="black">${label}</text>` : ""}</svg>`;
+            break;
+        }
+
+        // Place in viewport center
+        const vpGeo = editor.getViewportPageBounds();
+        let geoX = command.x;
+        let geoY = command.y;
+        if (geoX < vpGeo.x || geoX > vpGeo.x + vpGeo.w || geoY < vpGeo.y || geoY > vpGeo.y + vpGeo.h) {
+          geoX = vpGeo.x + vpGeo.w / 2 - gw / 2;
+          geoY = vpGeo.y + vpGeo.h / 2 - gh / 2;
+        }
+
+        editor.createShape({
+          type: "svg_shape",
+          x: geoX,
+          y: geoY,
+          props: { w: gw, h: gh, svg: geoSvg, color: "#1e293b" },
         } as unknown as CreateShapeInput);
         createdShapeIds.push("created");
+        console.log("[create_geo→svg]", geoType, "at", geoX, geoY);
         break;
       }
       case "create_arrow": {
-        const dx = command.toX - command.x;
-        const dy = command.toY - command.y;
-        if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
-          console.warn("Skipping invalid arrow command", command);
-          break;
-        }
+        // Default to viewport center if coordinates are missing
+        const vpa = editor.getViewportPageBounds();
+        const ax = Number.isFinite(command.x) ? command.x : vpa.x + vpa.w * 0.3;
+        const ay = Number.isFinite(command.y) ? command.y : vpa.y + vpa.h / 2;
+        const atx = Number.isFinite(command.toX) ? command.toX : vpa.x + vpa.w * 0.7;
+        const aty = Number.isFinite(command.toY) ? command.toY : vpa.y + vpa.h / 2;
+        const dx = atx - ax;
+        const dy = aty - ay;
 
-        const arrowShapeId = editor.createShape({
+        editor.createShape({
           type: "arrow",
-          x: command.x,
-          y: command.y,
+          x: ax,
+          y: ay,
           props: {
             start: { x: 0, y: 0 },
             end: { x: dx, y: dy },
@@ -3271,82 +3402,63 @@ function applyBoardCommand(
         break;
       }
       case "create_freehand": {
-        // Validate points array has at least 2 points
         if (!command.points || command.points.length < 2) {
           console.warn("Skipping create_freehand, need at least 2 points", command);
           break;
         }
 
-        // Convert points to tldraw format: [[x, y, pressure], ...]
-        const drawPoints: [number, number, number][] = command.points.map((p) => [
-          p.x,
-          p.y,
-          0.5, // default pressure
-        ]);
-
-        // Calculate center point for shape position
-        const sumX = command.points.reduce((sum, p) => sum + p.x, 0);
-        const sumY = command.points.reduce((sum, p) => sum + p.y, 0);
-        const centerX = sumX / command.points.length;
-        const centerY = sumY / command.points.length;
-
-        // Get stroke options with defaults
-        const strokeWidth = command.strokeWidth ?? 2;
+        const fhPoints = command.points.map((p) => ({ x: p.x, y: p.y, z: 0.5 }));
+        const ox = fhPoints[0].x;
+        const oy = fhPoints[0].y;
+        const relPoints = fhPoints.map((p) => ({ x: p.x - ox, y: p.y - oy, z: 0.5 }));
         const color = command.color ?? "black";
 
-        const freehandId = editor.createShape({
+        editor.createShape({
           type: "draw",
-          x: centerX,
-          y: centerY,
+          x: ox,
+          y: oy,
           props: {
-            points: drawPoints,
+            segments: [{ type: "free", path: b64Vecs.encodePoints(relPoints) }],
             color: color,
-            size: strokeWidth,
+            size: "s",
+            dash: "draw",
+            isComplete: true,
+            isClosed: false,
+            isPen: false,
+            scale: 1,
+            scaleX: 1,
+            scaleY: 1,
           },
         } as unknown as CreateShapeInput);
         createdShapeIds.push("created");
         break;
       }
       case "create_freehand_stroke": {
-        // Validate points array has at least 2 points
         if (!command.points || command.points.length < 2) {
           console.warn("Skipping create_freehand_stroke, need at least 2 points", command);
           break;
         }
 
-        // Validate required strokeWidth
-        if (typeof command.strokeWidth !== "number" || !Number.isFinite(command.strokeWidth) || command.strokeWidth <= 0) {
-          console.warn("Skipping create_freehand_stroke, invalid strokeWidth", command);
-          break;
-        }
+        const fhsPoints = command.points.map((p) => ({ x: p.x, y: p.y, z: 0.5 }));
+        const ox2 = fhsPoints[0].x;
+        const oy2 = fhsPoints[0].y;
+        const relPoints2 = fhsPoints.map((p) => ({ x: p.x - ox2, y: p.y - oy2, z: 0.5 }));
 
-        // Validate required color
-        if (!command.color || typeof command.color !== "string") {
-          console.warn("Skipping create_freehand_stroke, invalid color", command);
-          break;
-        }
-
-        // Convert points to tldraw format: [[x, y, pressure], ...]
-        const drawPoints: [number, number, number][] = command.points.map((p) => [
-          p.x,
-          p.y,
-          0.5, // default pressure
-        ]);
-
-        // Calculate center point for shape position
-        const sumX = command.points.reduce((sum, p) => sum + p.x, 0);
-        const sumY = command.points.reduce((sum, p) => sum + p.y, 0);
-        const centerX = sumX / command.points.length;
-        const centerY = sumY / command.points.length;
-
-        const freehandStrokeId = editor.createShape({
+        editor.createShape({
           type: "draw",
-          x: centerX,
-          y: centerY,
+          x: ox2,
+          y: oy2,
           props: {
-            points: drawPoints,
+            segments: [{ type: "free", path: b64Vecs.encodePoints(relPoints2) }],
             color: command.color,
-            size: command.strokeWidth,
+            size: "s",
+            dash: "draw",
+            isComplete: true,
+            isClosed: false,
+            isPen: false,
+            scale: 1,
+            scaleX: 1,
+            scaleY: 1,
           },
         } as unknown as CreateShapeInput);
         createdShapeIds.push("created");
@@ -3454,405 +3566,457 @@ function applyBoardCommand(
         break;
       }
       // ============================================
-      // 3D Shape Commands (Req 8.1-8.6)
+      // SVG Shape Command - AI generates SVG code directly
       // ============================================
-      case "create_3d_cube": {
-        const { x, y, size, labels } = command;
-        
-        // Validate parameters
-        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(size) || size <= 0) {
-          console.warn("Skipping create_3d_cube, invalid parameters", command);
+      case "create_svg": {
+        const { svg, color } = command;
+        let x: number = (command.x as number) ?? 0;
+        let y: number = (command.y as number) ?? 0;
+        const w = command.w ?? 200;
+        const h = command.h ?? 200;
+
+        // Validate SVG content
+        if (!svg || typeof svg !== "string") {
+          console.warn("Skipping create_svg, missing SVG content", command);
           break;
         }
 
-        const { faces, edges } = calculateCubeProjection(x, y, size);
+        const width = Number.isFinite(w) && w > 0 ? w : 200;
+        const height = Number.isFinite(h) && h > 0 ? h : 200;
+        const strokeColor = color || "#1e293b";
 
-        // Create faces as geo shapes
-        for (const face of faces) {
-          const minX = Math.min(...face.points.map(p => p.x));
-          const minY = Math.min(...face.points.map(p => p.y));
-          const maxX = Math.max(...face.points.map(p => p.x));
-          const maxY = Math.max(...face.points.map(p => p.y));
-          const w = Math.max(maxX - minX, 1);
-          const h = Math.max(maxY - minY, 1);
-
-          const faceId = editor.createShape({
-            type: "geo",
-            x: minX,
-            y: minY,
-            props: {
-              geo: "polygon",
-              w,
-              h,
-              fill: face.color,
-              color: "#1e293b",
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
+        // Use agent coordinates if valid, otherwise viewport center
+        const vpSvg = editor.getViewportPageBounds();
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          x = vpSvg.x + vpSvg.w / 2 - width / 2;
+          y = vpSvg.y + vpSvg.h / 2 - height / 2;
         }
 
-        // Create edges as arrows
-        for (const edge of edges) {
-          const dx = edge.end.x - edge.start.x;
-          const dy = edge.end.y - edge.start.y;
-
-          editor.createShape({
-            type: "arrow",
-            x: edge.start.x,
-            y: edge.start.y,
-            props: {
-              start: { x: 0, y: 0 },
-              end: { x: dx, y: dy },
-              color: "#1e293b",
-              size: 2,
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edge labels
-        if (labels?.edges) {
-          const edgeLabels = createEdgeLabels(edges, labels.edges);
-          for (const label of edgeLabels) {
-            editor.createShape({
-              type: "text",
-              x: label.position.x,
-              y: label.position.y,
-              props: {
-                richText: toRichText(label.text),
-                color: "#1e293b",
-                fontSize: 12,
-              },
-            } as unknown as CreateShapeInput);
-            createdShapeIds.push("created");
-          }
-        }
+        const svgShapeId = editor.createShape({
+          type: "svg_shape",
+          x,
+          y,
+          props: {
+            w: width,
+            h: height,
+            svg: svg,
+            color: strokeColor,
+          },
+        } as unknown as CreateShapeInput);
+        createdShapeIds.push("created");
+        editor.zoomToFit({ animation: { duration: 300 } });
+        console.log("Created SVG shape:", svgShapeId, "at", x, y);
         break;
       }
-      case "create_3d_prism": {
-        const { x, y, width, height, depth, type, labels } = command;
+      // ============================================
+      // Math Graph Command - accurate function plotting
+      // ============================================
+      // Math Graph Command - composable native tldraw shapes
+      // Each curve = freehand draw shape (selectable/deletable)
+      // Axes = arrows, Labels = text shapes, all grouped
+      // ============================================
+      case "create_graph": {
+        const {
+          expressions,
+          x: _gx = 0,
+          y: _gy = 0,
+          w: gw = 400,
+          h: gh = 300,
+          xMin = -2 * Math.PI,
+          xMax = 2 * Math.PI,
+          yMin,
+          yMax,
+          title,
+        } = command;
+        let gx = _gx;
+        let gy = _gy;
 
-        // Validate parameters
-        if (!Number.isFinite(x) || !Number.isFinite(y) || 
-            !Number.isFinite(width) || width <= 0 ||
-            !Number.isFinite(height) || height <= 0 ||
-            !Number.isFinite(depth) || depth <= 0) {
-          console.warn("Skipping create_3d_prism, invalid parameters", command);
+        if (!expressions || expressions.length === 0) {
+          console.warn("[create_graph] No expressions provided");
           break;
         }
 
-        let faces: Face[], edges: Edge[];
+        // If position is 0,0 exactly (agent default), center in viewport
+        if (gx === 0 && gy === 0) {
+          const vp = editor.getViewportPageBounds();
+          gx = vp.x + vp.w / 2 - gw / 2;
+          gy = vp.y + vp.h / 2 - gh / 2;
+        }
 
-        if (type === "triangular") {
-          const proj = calculateTriangularPrismProjection(x, y, width, height, depth);
-          faces = proj.faces;
-          edges = proj.edges;
+        console.log("[create_graph] Plotting:", expressions.map((e) => e.expr).join(", "));
+
+        const PADDING = { top: title ? 40 : 20, right: 20, bottom: 36, left: 44 };
+        const plotW = gw - PADDING.left - PADDING.right;
+        const plotH = gh - PADDING.top - PADDING.bottom;
+        const STEPS = 300;
+
+        // Evaluate all expressions to find y range
+        const allComputedPoints: Array<Array<{ x: number; y: number } | null>> = [];
+        for (const { expr } of expressions) {
+          const pts: Array<{ x: number; y: number } | null> = [];
+          for (let i = 0; i <= STEPS; i++) {
+            const xVal = xMin + (i / STEPS) * (xMax - xMin);
+            try {
+              const yVal = mathEvaluate(expr, { x: xVal, pi: Math.PI, e: Math.E, ln: Math.log });
+              pts.push(typeof yVal === "number" && isFinite(yVal) ? { x: xVal, y: yVal } : null);
+            } catch { pts.push(null); }
+          }
+          allComputedPoints.push(pts);
+        }
+
+        // Auto y range
+        let computedYMin = yMin;
+        let computedYMax = yMax;
+        if (computedYMin === undefined || computedYMax === undefined) {
+          const allY = allComputedPoints.flat().filter(Boolean).map((p) => p!.y);
+          if (allY.length === 0) { computedYMin = -10; computedYMax = 10; }
+          else {
+            const pad = (Math.min(Math.max(...allY), 50) - Math.max(Math.min(...allY), -50)) * 0.1 || 1;
+            computedYMin = computedYMin ?? Math.max(Math.min(...allY), -50) - pad;
+            computedYMax = computedYMax ?? Math.min(Math.max(...allY), 50) + pad;
+          }
+        }
+        const yRange = (computedYMax! - computedYMin!) || 1;
+        const xRange = xMax - xMin;
+
+        const toSvgX = (x: number) => gx + PADDING.left + ((x - xMin) / xRange) * plotW;
+        const toSvgY = (y: number) => gy + PADDING.top + ((computedYMax! - y) / yRange) * plotH;
+
+        const graphShapeIds: TLShapeId[] = [];
+
+        // Helper: create shape with pre-generated ID and track it
+        const addGraphShape = (shapeData: Record<string, unknown>) => {
+          const id = createShapeId();
+          editor.createShape({ id, ...shapeData } as any);
+          graphShapeIds.push(id);
+        };
+
+        // Title text
+        if (title) {
+          addGraphShape({
+            type: "text",
+            x: gx + gw / 2 - 60,
+            y: gy + 4,
+            props: { richText: toRichText(title), size: "s", color: "black" },
+          });
+        }
+
+        // X axis arrow
+        const axisY = Math.max(gy + PADDING.top, Math.min(gy + PADDING.top + plotH, toSvgY(0)));
+        const axisX = Math.max(gx + PADDING.left, Math.min(gx + PADDING.left + plotW, toSvgX(0)));
+        addGraphShape({
+          type: "arrow", x: gx + PADDING.left, y: axisY,
+          props: { start: { x: 0, y: 0 }, end: { x: plotW + 12, y: 0 }, richText: toRichText(""), color: "black", size: "s" },
+        });
+
+        // Y axis arrow
+        addGraphShape({
+          type: "arrow", x: axisX, y: gy + PADDING.top + plotH + 12,
+          props: { start: { x: 0, y: 0 }, end: { x: 0, y: -(plotH + 24) }, richText: toRichText(""), color: "black", size: "s" },
+        });
+
+        // Axis labels
+        addGraphShape({ type: "text", x: gx + PADDING.left + plotW + 14, y: axisY - 8, props: { richText: toRichText("x"), size: "s", color: "black" } });
+        addGraphShape({ type: "text", x: axisX + 4, y: gy + PADDING.top - 20, props: { richText: toRichText("y"), size: "s", color: "black" } });
+
+        // X tick labels
+        const xTicks = 6;
+        for (let i = 0; i <= xTicks; i++) {
+          const xv = xMin + (i / xTicks) * xRange;
+          const sx = toSvgX(xv);
+          const label = Math.abs(xv) < 0.01 ? "0" : Number.isInteger(xv) ? xv.toString() : xv.toFixed(1);
+          addGraphShape({ type: "text", x: sx - 8, y: axisY + 6, props: { richText: toRichText(label), size: "s", color: "grey" } });
+        }
+
+        // Y tick labels
+        const yTicks = 5;
+        for (let i = 0; i <= yTicks; i++) {
+          const yv = computedYMin! + (i / yTicks) * yRange;
+          const sy = toSvgY(yv);
+          const label = Math.abs(yv) < 0.01 ? "0" : Number.isInteger(yv) ? yv.toString() : yv.toFixed(1);
+          addGraphShape({ type: "text", x: gx + PADDING.left - 28, y: sy - 6, props: { richText: toRichText(label), size: "s", color: "grey" } });
+        }
+
+        // Plot each expression as a freehand draw shape (native, selectable, deletable)
+        // tldraw valid colors: black, grey, light-violet, violet, blue, light-blue, cyan,
+        //                      green, light-green, yellow, orange, red, light-red, white
+        const CURVE_COLORS = ["blue", "red", "green", "orange", "violet", "cyan"];
+        for (let ei = 0; ei < allComputedPoints.length; ei++) {
+          const pts = allComputedPoints[ei];
+          // Map any hex/css color to nearest tldraw color name
+          const rawColor = expressions[ei].color;
+          const color = rawColor ?? CURVE_COLORS[ei % CURVE_COLORS.length];
+
+          // Split into segments at asymptotes (null points)
+          const segments: Array<Array<{ x: number; y: number }>> = [];
+          let current: Array<{ x: number; y: number }> = [];
+
+          for (const pt of pts) {
+            if (pt === null) {
+              if (current.length >= 2) segments.push(current);
+              current = [];
+              continue;
+            }
+            const sy = toSvgY(pt.y);
+            // Skip points outside plot area
+            if (sy < gy + PADDING.top - 2 || sy > gy + PADDING.top + plotH + 2) {
+              if (current.length >= 2) segments.push(current);
+              current = [];
+              continue;
+            }
+            current.push({ x: toSvgX(pt.x), y: sy });
+          }
+          if (current.length >= 2) segments.push(current);
+
+          for (const seg of segments) {
+            if (seg.length < 2) continue;
+            const ox = seg[0].x;
+            const oy = seg[0].y;
+            const drawPoints = seg.map((p) => ({ x: p.x - ox, y: p.y - oy, z: 0.5 }));
+
+            addGraphShape({
+              type: "draw", x: ox, y: oy,
+              props: {
+                segments: [{ type: "free", path: b64Vecs.encodePoints(drawPoints) }],
+                color: color, size: "s", dash: "solid",
+                isComplete: true, isClosed: false, isPen: false, scale: 1, scaleX: 1, scaleY: 1,
+              },
+            });
+          }
+
+          // Legend label if multiple expressions
+          if (expressions.length > 1) {
+            const legendLabel = expressions[ei].label ?? expressions[ei].expr;
+            addGraphShape({ type: "text", x: gx + PADDING.left + 8, y: gy + PADDING.top + 8 + ei * 18, props: { richText: toRichText(legendLabel), size: "s", color: color } });
+          }
+        }
+
+        // Group all shapes together
+        if (graphShapeIds.length > 1) {
+          editor.groupShapes(graphShapeIds);
+        }
+
+        createdShapeIds.push("created");
+        console.log("[create_graph] Created composable graph with", graphShapeIds.length, "shapes");
+        break;
+      }
+      // ============================================
+      // Update existing shape — modify without recreating
+      // ============================================
+      case "update_shape": {
+        const { shapeId, label, color, x: ux, y: uy, w: uw, h: uh } = command;
+        const existing = editor.getShape(shapeId as TLShapeId);
+        if (!existing) {
+          console.warn("[update_shape] Shape not found:", shapeId);
+          break;
+        }
+
+        const propsUpdate: Record<string, unknown> = {};
+        if (label !== undefined) propsUpdate.richText = toRichText(label);
+        if (color !== undefined) propsUpdate.color = color;
+        if (uw !== undefined) propsUpdate.w = uw;
+        if (uh !== undefined) propsUpdate.h = uh;
+
+        const posUpdate: Record<string, unknown> = {};
+        if (ux !== undefined) posUpdate.x = ux;
+        if (uy !== undefined) posUpdate.y = uy;
+
+        editor.updateShape({
+          id: shapeId as TLShapeId,
+          type: existing.type,
+          ...posUpdate,
+          props: Object.keys(propsUpdate).length > 0 ? propsUpdate : undefined,
+        } as any);
+
+        console.log("[update_shape] Updated shape:", shapeId);
+        break;
+      }
+
+      // ============================================
+      // Delete a specific shape by ID
+      // ============================================
+      case "delete_shape": {
+        const { shapeId } = command;
+        const existing = editor.getShape(shapeId as TLShapeId);
+        if (!existing) {
+          console.warn("[delete_shape] Shape not found:", shapeId);
+          break;
+        }
+        editor.deleteShape(shapeId as TLShapeId);
+        console.log("[delete_shape] Deleted shape:", shapeId);
+        break;
+      }
+
+      // ============================================
+      // Undo last action
+      // ============================================
+      case "undo": {
+        editor.undo();
+        console.log("[undo] Undid last action");
+        break;
+      }
+
+      // ============================================
+      // Regular polygon / star by math
+      // ============================================
+      case "create_polygon": {
+        const { sides, x: px, y: py, radius, rotation = 0, star = false, label } = command;
+        if (!sides || sides < 3 || !radius) {
+          console.warn("[create_polygon] Invalid params", command);
+          break;
+        }
+
+        const vp = editor.getViewportPageBounds();
+        let cx = px, cy = py;
+        if (cx < vp.x || cx > vp.x + vp.w || cy < vp.y || cy > vp.y + vp.h) {
+          cx = vp.x + vp.w / 2;
+          cy = vp.y + vp.h / 2;
+        }
+
+        const rotRad = (rotation * Math.PI) / 180;
+        const points: string[] = [];
+
+        if (star) {
+          const innerR = radius / 2.5;
+          for (let i = 0; i < sides * 2; i++) {
+            const angle = (i * Math.PI) / sides + rotRad - Math.PI / 2;
+            const r = i % 2 === 0 ? radius : innerR;
+            points.push(`${(r * Math.cos(angle)).toFixed(2)},${(r * Math.sin(angle)).toFixed(2)}`);
+          }
         } else {
-          const proj = calculatePrismProjection(x, y, width, height, depth);
-          faces = proj.faces;
-          edges = proj.edges;
-        }
-
-        // Create faces
-        for (const face of faces) {
-          const minX = Math.min(...face.points.map(p => p.x));
-          const minY = Math.min(...face.points.map(p => p.y));
-          const maxX = Math.max(...face.points.map(p => p.x));
-          const maxY = Math.max(...face.points.map(p => p.y));
-          const w = Math.max(maxX - minX, 1);
-          const h = Math.max(maxY - minY, 1);
-
-          const prismFaceId = editor.createShape({
-            type: "geo",
-            x: minX,
-            y: minY,
-            props: {
-              geo: "polygon",
-              w,
-              h,
-              fill: face.color,
-              color: "#1e293b",
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edges
-        for (const edge of edges) {
-          const dx = edge.end.x - edge.start.x;
-          const dy = edge.end.y - edge.start.y;
-
-          editor.createShape({
-            type: "arrow",
-            x: edge.start.x,
-            y: edge.start.y,
-            props: {
-              start: { x: 0, y: 0 },
-              end: { x: dx, y: dy },
-              color: "#1e293b",
-              size: 2,
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edge labels
-        if (labels?.edges) {
-          const edgeLabels = createEdgeLabels(edges, labels.edges);
-          for (const label of edgeLabels) {
-            editor.createShape({
-              type: "text",
-              x: label.position.x,
-              y: label.position.y,
-              props: {
-                richText: toRichText(label.text),
-                color: "#1e293b",
-                fontSize: 12,
-              },
-            } as unknown as CreateShapeInput);
-            createdShapeIds.push("created");
+          for (let i = 0; i < sides; i++) {
+            const angle = (2 * Math.PI * i) / sides + rotRad - Math.PI / 2;
+            points.push(`${(radius * Math.cos(angle)).toFixed(2)},${(radius * Math.sin(angle)).toFixed(2)}`);
           }
         }
+
+        const pad = radius * 0.1;
+        const svgSize = (radius + pad) * 2;
+        const offset = radius + pad;
+        const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${-offset} ${-offset} ${svgSize} ${svgSize}"><polygon points="${points.join(" ")}" fill="none" stroke="black" stroke-width="${(radius * 0.04).toFixed(1)}"/>${label ? `<text x="0" y="${(radius * 0.15).toFixed(1)}" text-anchor="middle" font-size="${(radius * 0.2).toFixed(1)}" fill="black">${label}</text>` : ""}</svg>`;
+
+        const polyId = createShapeId();
+        editor.createShape({
+          id: polyId,
+          type: "svg_shape",
+          x: cx - offset,
+          y: cy - offset,
+          props: { w: svgSize, h: svgSize, svg: svgStr, color: "#1e293b" },
+        } as any);
+        createdShapeIds.push("created");
+        editor.zoomToFit({ animation: { duration: 300 } });
         break;
       }
-      case "create_3d_cylinder": {
-        const { x, y, radius, height, labels } = command;
 
-        // Validate parameters
-        if (!Number.isFinite(x) || !Number.isFinite(y) || 
-            !Number.isFinite(radius) || radius <= 0 ||
-            !Number.isFinite(height) || height <= 0) {
-          console.warn("Skipping create_3d_cylinder, invalid parameters", command);
-          break;
+      // ============================================
+      // Parametric Graph
+      // ============================================
+      case "create_parametric_graph": {
+        const {
+          exprX, exprY,
+          tMin = 0, tMax = 2 * Math.PI,
+          x: pgx = 0, y: pgy = 0,
+          w: pgw = 400, h: pgh = 300,
+          color: pgColor, label: pgLabel, title: pgTitle,
+        } = command;
+
+        const vp2 = editor.getViewportPageBounds();
+        let pgxFinal = pgx, pgyFinal = pgy;
+        if (pgxFinal < vp2.x || pgxFinal > vp2.x + vp2.w || pgyFinal < vp2.y || pgyFinal > vp2.y + vp2.h) {
+          pgxFinal = vp2.x + vp2.w / 2 - pgw / 2;
+          pgyFinal = vp2.y + vp2.h / 2 - pgh / 2;
         }
 
-        const { faces, edges } = calculateCylinderProjection(x, y, radius, height);
-
-        // Create faces
-        for (const face of faces) {
-          const minX = Math.min(...face.points.map(p => p.x));
-          const minY = Math.min(...face.points.map(p => p.y));
-          const maxX = Math.max(...face.points.map(p => p.x));
-          const maxY = Math.max(...face.points.map(p => p.y));
-          const w = Math.max(maxX - minX, 1);
-          const h = Math.max(maxY - minY, 1);
-
-          const cylFaceId = editor.createShape({
-            type: "geo",
-            x: minX,
-            y: minY,
-            props: {
-              geo: "ellipse",
-              w,
-              h,
-              fill: face.color,
-              color: "#1e293b",
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
+        const TSTEPS = 400;
+        const tPoints: Array<{ x: number; y: number } | null> = [];
+        for (let i = 0; i <= TSTEPS; i++) {
+          const t = tMin + (i / TSTEPS) * (tMax - tMin);
+          try {
+            const xv = mathEvaluate(exprX, { t, pi: Math.PI, e: Math.E, ln: Math.log });
+            const yv = mathEvaluate(exprY, { t, pi: Math.PI, e: Math.E, ln: Math.log });
+            tPoints.push(typeof xv === "number" && typeof yv === "number" && isFinite(xv) && isFinite(yv) ? { x: xv, y: yv } : null);
+          } catch { tPoints.push(null); }
         }
 
-        // Create edges
-        for (const edge of edges) {
-          const dx = edge.end.x - edge.start.x;
-          const dy = edge.end.y - edge.start.y;
+        const validPts = tPoints.filter(Boolean) as Array<{ x: number; y: number }>;
+        if (validPts.length < 2) { console.warn("[create_parametric_graph] No valid points"); break; }
 
-          editor.createShape({
-            type: "arrow",
-            x: edge.start.x,
-            y: edge.start.y,
-            props: {
-              start: { x: 0, y: 0 },
-              end: { x: dx, y: dy },
-              color: "#1e293b",
-              size: 2,
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
+        const PADDING2 = { top: pgTitle ? 40 : 20, right: 20, bottom: 36, left: 44 };
+        const plotW2 = pgw - PADDING2.left - PADDING2.right;
+        const plotH2 = pgh - PADDING2.top - PADDING2.bottom;
+
+        const allX = validPts.map(p => p.x), allY = validPts.map(p => p.y);
+        const xMinP = Math.min(...allX), xMaxP = Math.max(...allX);
+        const yMinP = Math.min(...allY), yMaxP = Math.max(...allY);
+        const xRangeP = xMaxP - xMinP || 1, yRangeP = yMaxP - yMinP || 1;
+
+        const toSX = (xv: number) => pgxFinal + PADDING2.left + ((xv - xMinP) / xRangeP) * plotW2;
+        const toSY = (yv: number) => pgyFinal + PADDING2.top + ((yMaxP - yv) / yRangeP) * plotH2;
+
+        const pgShapeIds: TLShapeId[] = [];
+        const addPGShape = (data: Record<string, unknown>) => {
+          const id = createShapeId();
+          editor.createShape({ id, ...data } as any);
+          pgShapeIds.push(id);
+        };
+
+        if (pgTitle) addPGShape({ type: "text", x: pgxFinal + pgw / 2 - 60, y: pgyFinal + 4, props: { richText: toRichText(pgTitle), size: "s", color: "black" } });
+
+        const axisY2 = Math.max(pgyFinal + PADDING2.top, Math.min(pgyFinal + PADDING2.top + plotH2, toSY(0)));
+        const axisX2 = Math.max(pgxFinal + PADDING2.left, Math.min(pgxFinal + PADDING2.left + plotW2, toSX(0)));
+        addPGShape({ type: "arrow", x: pgxFinal + PADDING2.left, y: axisY2, props: { start: { x: 0, y: 0 }, end: { x: plotW2 + 12, y: 0 }, richText: toRichText(""), color: "black", size: "s" } });
+        addPGShape({ type: "arrow", x: axisX2, y: pgyFinal + PADDING2.top + plotH2 + 12, props: { start: { x: 0, y: 0 }, end: { x: 0, y: -(plotH2 + 24) }, richText: toRichText(""), color: "black", size: "s" } });
+
+        // Draw the parametric curve
+        const curveColor = pgColor ?? "blue";
+        const segments2: Array<Array<{ x: number; y: number }>> = [];
+        let cur2: Array<{ x: number; y: number }> = [];
+        for (const pt of tPoints) {
+          if (!pt) { if (cur2.length >= 2) segments2.push(cur2); cur2 = []; continue; }
+          const sx = toSX(pt.x), sy = toSY(pt.y);
+          if (sy < pgyFinal + PADDING2.top - 2 || sy > pgyFinal + PADDING2.top + plotH2 + 2) { if (cur2.length >= 2) segments2.push(cur2); cur2 = []; continue; }
+          cur2.push({ x: sx, y: sy });
+        }
+        if (cur2.length >= 2) segments2.push(cur2);
+
+        for (const seg of segments2) {
+          if (seg.length < 2) continue;
+          const ox = seg[0].x, oy = seg[0].y;
+          addPGShape({ type: "draw", x: ox, y: oy, props: { segments: [{ type: "free", path: b64Vecs.encodePoints(seg.map(p => ({ x: p.x - ox, y: p.y - oy, z: 0.5 }))) }], color: curveColor, size: "s", dash: "solid", isComplete: true, isClosed: false, isPen: false, scale: 1, scaleX: 1, scaleY: 1 } });
         }
 
-        // Create edge labels
-        if (labels?.edges) {
-          const edgeLabels = createEdgeLabels(edges, labels.edges);
-          for (const label of edgeLabels) {
-            editor.createShape({
-              type: "text",
-              x: label.position.x,
-              y: label.position.y,
-              props: {
-                richText: toRichText(label.text),
-                color: "#1e293b",
-                fontSize: 12,
-              },
-            } as unknown as CreateShapeInput);
-            createdShapeIds.push("created");
-          }
-        }
+        if (pgLabel) addPGShape({ type: "text", x: pgxFinal + PADDING2.left + 8, y: pgyFinal + PADDING2.top + 8, props: { richText: toRichText(pgLabel), size: "s", color: curveColor } });
+
+        if (pgShapeIds.length > 1) editor.groupShapes(pgShapeIds);
+        createdShapeIds.push("created");
+        console.log("[create_parametric_graph] Created with", pgShapeIds.length, "shapes");
         break;
       }
-      case "create_3d_cone": {
-        const { x, y, radius, height, labels } = command;
 
-        // Validate parameters
-        if (!Number.isFinite(x) || !Number.isFinite(y) || 
-            !Number.isFinite(radius) || radius <= 0 ||
-            !Number.isFinite(height) || height <= 0) {
-          console.warn("Skipping create_3d_cone, invalid parameters", command);
-          break;
-        }
-
-        const { faces, edges } = calculateConeProjection(x, y, radius, height);
-
-        // Create faces
-        for (const face of faces) {
-          const minX = Math.min(...face.points.map(p => p.x));
-          const minY = Math.min(...face.points.map(p => p.y));
-          const maxX = Math.max(...face.points.map(p => p.x));
-          const maxY = Math.max(...face.points.map(p => p.y));
-          const w = Math.max(maxX - minX, 1);
-          const h = Math.max(maxY - minY, 1);
-
-          const coneFaceId = editor.createShape({
-            type: "geo",
-            x: minX,
-            y: minY,
-            props: {
-              geo: "ellipse",
-              w,
-              h,
-              fill: face.color,
-              color: "#1e293b",
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edges
-        for (const edge of edges) {
-          const dx = edge.end.x - edge.start.x;
-          const dy = edge.end.y - edge.start.y;
-
-          editor.createShape({
-            type: "arrow",
-            x: edge.start.x,
-            y: edge.start.y,
-            props: {
-              start: { x: 0, y: 0 },
-              end: { x: dx, y: dy },
-              color: "#1e293b",
-              size: 2,
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edge labels
-        if (labels?.edges) {
-          const edgeLabels = createEdgeLabels(edges, labels.edges);
-          for (const label of edgeLabels) {
-            editor.createShape({
-              type: "text",
-              x: label.position.x,
-              y: label.position.y,
-              props: {
-                richText: toRichText(label.text),
-                color: "#1e293b",
-                fontSize: 12,
-              },
-            } as unknown as CreateShapeInput);
-            createdShapeIds.push("created");
-          }
-        }
-        break;
-      }
-      case "create_3d_pyramid": {
-        const { x, y, baseSize, height, labels } = command;
-
-        // Validate parameters
-        if (!Number.isFinite(x) || !Number.isFinite(y) || 
-            !Number.isFinite(baseSize) || baseSize <= 0 ||
-            !Number.isFinite(height) || height <= 0) {
-          console.warn("Skipping create_3d_pyramid, invalid parameters", command);
-          break;
-        }
-
-        const { faces, edges } = calculatePyramidProjection(x, y, baseSize, height);
-
-        // Create faces
-        for (const face of faces) {
-          const minX = Math.min(...face.points.map(p => p.x));
-          const minY = Math.min(...face.points.map(p => p.y));
-          const maxX = Math.max(...face.points.map(p => p.x));
-          const maxY = Math.max(...face.points.map(p => p.y));
-          const w = Math.max(maxX - minX, 1);
-          const h = Math.max(maxY - minY, 1);
-
-          const pyrFaceId = editor.createShape({
-            type: "geo",
-            x: minX,
-            y: minY,
-            props: {
-              geo: "polygon",
-              w,
-              h,
-              fill: face.color,
-              color: "#1e293b",
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edges
-        for (const edge of edges) {
-          const dx = edge.end.x - edge.start.x;
-          const dy = edge.end.y - edge.start.y;
-
-          editor.createShape({
-            type: "arrow",
-            x: edge.start.x,
-            y: edge.start.y,
-            props: {
-              start: { x: 0, y: 0 },
-              end: { x: dx, y: dy },
-              color: "#1e293b",
-              size: 2,
-            },
-          } as unknown as CreateShapeInput);
-          createdShapeIds.push("created");
-        }
-
-        // Create edge labels
-        if (labels?.edges) {
-          const edgeLabels = createEdgeLabels(edges, labels.edges);
-          for (const label of edgeLabels) {
-            editor.createShape({
-              type: "text",
-              x: label.position.x,
-              y: label.position.y,
-              props: {
-                richText: toRichText(label.text),
-                color: "#1e293b",
-                fontSize: 12,
-              },
-            } as unknown as CreateShapeInput);
-            createdShapeIds.push("created");
-          }
-        }
-        break;
-      }
       // ============================================
       // Board State Commands (Req 3.1, 3.2)
       // ============================================
       case "get_board_state": {
-        // Return board state summary - this is handled via response mechanism
-        // The actual response is sent through the room data channel
+        updateBoardState(editor, boardState);
         const summary = getBoardStateSummary(boardState);
-        console.log("Board state:", JSON.stringify(summary, (key, value) => {
-          if (value instanceof Map) {
-            return Object.fromEntries(value);
-          }
-          return value;
-        }, 2));
+        // Build a compact shape list the agent can use for IDs and positions
+        const shapeList = summary.shapes.map((s) => ({
+          id: s.id,
+          type: s.type,
+          label: s.label ?? "",
+          x: Math.round(s.bounds.x),
+          y: Math.round(s.bounds.y),
+          w: Math.round(s.bounds.w),
+          h: Math.round(s.bounds.h),
+        }));
+        const responsePayload = JSON.stringify({
+          op: "board_state_response",
+          shapeCount: summary.shapeCount,
+          shapes: shapeList,
+        });
+        console.log("[get_board_state] Returning", shapeList.length, "shapes to agent");
+        // Publish back so the agent tool call gets the result
+        targetState.lastBoardStateResponse = responsePayload;
         break;
       }
       case "get_shape_info": {
@@ -4455,13 +4619,23 @@ function BoardCommandBridge({
       if (topic !== "board.command") return;
 
       try {
-        const command = JSON.parse(
-          new TextDecoder().decode(payload)
-        ) as BoardCommand;
+        const rawText = new TextDecoder().decode(payload);
+        console.log("[BoardCommandBridge] Raw payload:", rawText.substring(0, 200));
+        const command = JSON.parse(rawText) as BoardCommand;
         console.log("[BoardCommandBridge] Received command:", command.op, command);
         applyBoardCommand(editor, command, targetStateRef.current, boardStateRef.current);
+
+        // If the command was get_board_state, publish the response back to the agent
+        if (command.op === "get_board_state" && targetStateRef.current.lastBoardStateResponse) {
+          const responseData = targetStateRef.current.lastBoardStateResponse;
+          targetStateRef.current.lastBoardStateResponse = null;
+          room.localParticipant.publishData(
+            new TextEncoder().encode(responseData),
+            { reliable: true, topic: "board.response" }
+          ).catch((e) => console.warn("[BoardCommandBridge] Failed to publish board response:", e));
+        }
       } catch (error) {
-        console.error("Failed to apply board command", error);
+        console.error("[BoardCommandBridge] Failed to parse/apply board command:", error);
       }
     };
 
@@ -4481,6 +4655,7 @@ export function TabloWorkspace() {
     pointerShapeId: null,
     thisShapeId: null,
     thatShapeId: null,
+    lastBoardStateResponse: null,
   });
   const boardStateRef = useRef<BoardState>(createBoardState());
   const [session, setSession] = useState<SessionBootstrap | null>(null);
@@ -4705,7 +4880,7 @@ export function TabloWorkspace() {
         <section className="flex min-h-screen flex-1">
           <div className="relative flex-1 overflow-hidden">
             <div className="absolute inset-0">
-              <Tldraw onMount={setEditor} autoFocus />
+              <Tldraw onMount={setEditor} autoFocus shapeUtils={svgShapeUtils} />
             </div>
           </div>
 

@@ -70,13 +70,40 @@ For early implementation work:
 
 Day 2 shipped a working LiveKit + Gemini Live voice loop:
 
-- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"`, starts an `AgentSession` with an `Agent` instance, and calls `await session.generate_reply()` to greet the learner.
+- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-latest"`, starts an `AgentSession` with a `TabloAgent` instance, and calls `await session.generate_reply()` to greet the learner.
 - **`backend/main.py`** — `/livekit/token` issues a signed participant JWT and dispatches `tablo-assistant` to the room via `livekit_api.agent_dispatch.create_dispatch`.
 - **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects with the token from the backend. `RoomAudioRenderer` plays AI audio. `VoiceAssistantControlBar` appears when connected.
 - **Vision now implemented** — the frontend renders the `tldraw` page to PNG frames and publishes a board video track through LiveKit; the agent session is started with `room_io.RoomOptions(video_input=True)` so Gemini Live receives ongoing board visuals.
-- **Drawing now implemented** — the agent publishes deterministic `board.command` events and the frontend applies them directly. Current command set includes absolute commands (`create_text`, `create_geo`, `create_arrow`) plus target-aware commands (`create_text_on_target`, `create_arrow_between_targets`) that resolve targets from selection, pointer, this/that references, or explicit shape IDs.
-- **Key env vars required:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY` (the plugin reads `GOOGLE_API_KEY`, not `GEMINI_API_KEY`).
-- **Model note:** `gemini-live-2.5-flash-native-audio` is Vertex AI only. The standard Gemini API key model name is `gemini-2.5-flash-native-audio-preview-12-2025`.
+- **Key env vars required:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY` (the plugin reads `GOOGLE_API_KEY`, not `GEMINI_API_KEY`). `GEMINI_API_KEY` is aliased to `GOOGLE_API_KEY` automatically in `agent.py` if only the former is set.
+- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. The standard Gemini API key model is `gemini-2.5-flash-native-audio-latest` (or the dated preview variant).
+
+### AI Drawing Capabilities — What is now implemented
+
+A full AI drawing system has been built on top of the `board.command` data topic. The agent uses a single `execute_command` function tool that accepts a JSON command string. The frontend parses and applies commands directly to `tldraw`.
+
+**Agent side (`backend/agent.py`):**
+- `TabloAgent` extends `Agent` and holds a reference to the LiveKit room for publishing data.
+- `execute_command` tool — sends any board command as a JSON string over `board.command`. For `get_board_state`, it waits up to 3 seconds for a `board.response` reply from the frontend.
+- `calculate` tool — safe Python `eval` for arithmetic so the agent never guesses math.
+- The agent system prompt includes detailed drawing instructions, SVG rules, and a Socratic teaching workflow.
+
+**Frontend side (`frontend/src/components/tablo-workspace.tsx`):**
+- Listens on `board.command` data topic and dispatches to a typed command handler.
+- Full command set implemented:
+  - **Text:** `create_text`, `create_multiline_text`, `create_text_near_selection`, `create_formula`, `create_text_on_target`
+  - **Geometry:** `create_geo` (rectangle, ellipse, diamond, triangle), `create_arrow`, `create_arrow_between_targets`, `create_freehand`, `create_freehand_stroke`
+  - **SVG:** `create_svg` — agent generates raw SVG; frontend embeds it as a custom tldraw shape
+  - **Math graphs:** `create_graph` — agent provides expressions (e.g. `sin(x)`, `x^2`); frontend evaluates them with `mathjs` and renders an accurate canvas plot
+  - **Parametric graphs:** `create_parametric_graph` — agent provides `exprX`/`exprY` as functions of `t`; frontend plots the curve
+  - **Regular polygons:** `create_polygon` — mathematically precise n-gons and stars by circumradius
+  - **Board state:** `get_board_state` returns all shape IDs, types, bounds, labels, and relationships; `get_shape_info` returns detail for one shape; `match_shapes` finds shapes by visual criteria
+  - **Shape mutation:** `update_shape` (move, resize, relabel, recolor), `delete_shape`, `undo`
+  - **Cleanup:** `clear_board`, `clear_shapes`, `clear_region`
+  - **Positioning:** `get_position_info`, `calculate_position`, `get_distance`, `suggest_placement`, `place_with_collision_check`
+  - **Labels:** `create_side_label` (normal / inverted / side-inverted placement relative to a shape edge)
+  - **Alignment:** `snap_to_grid`, `snap_bounds_to_grid`, `align_shapes`
+- Command validation layer rejects malformed commands with typed error codes before execution.
+- All commands are logged with success/failure status for debugging.
 
 ## Frontend Implementation Guardrails
 
@@ -92,9 +119,13 @@ Day 2 shipped a working LiveKit + Gemini Live voice loop:
 - Early backend work should expose real readiness, bootstrap, sync, or orchestration boundaries.
 - LiveKit + Gemini Live voice is **now working** — do not regress it.
 - Vision feed + board-command drawing are now working — do not regress them.
+- The full AI drawing command set is now working — do not regress it. See the "AI Drawing Capabilities" section above for the complete command list.
 - `livekit-agents` worker must be run separately from FastAPI: `python agent.py dev`.
 - `AgentSession.start()` in v1.5+ requires `agent=Agent(...)` as the first positional arg and `room=ctx.room` as a keyword — not `session.start(ctx.room)`.
-- The plugin env var is `GOOGLE_API_KEY`. `GEMINI_API_KEY` alone is not read by the plugin.
+- The plugin env var is `GOOGLE_API_KEY`. `GEMINI_API_KEY` alone is not read by the plugin (though `agent.py` aliases it automatically).
+- The agent uses `google.beta.realtime.RealtimeModel` — note the `beta` namespace.
+- The `execute_command` tool is the single entry point for all board drawing. Do not add separate per-shape tools.
+- The `calculate` tool must be used for all arithmetic — never let the model guess math.
 
 ## Agent Behavior for This Repo
 

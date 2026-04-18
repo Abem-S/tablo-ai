@@ -594,16 +594,37 @@ This should read as an execution plan for the architecture above, not just as a 
 
 What shipped:
 
-- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (Gemini's native speech-to-speech model), starts an `AgentSession` with `await session.start(agent=Agent(...), room=ctx.room, room_options=room_io.RoomOptions(video_input=True))`, and greets the learner via `await session.generate_reply()`.
+- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-latest"` (Gemini's native speech-to-speech model), starts an `AgentSession` with `await session.start(agent=TabloAgent(...), room=ctx.room, room_options=room_io.RoomOptions(video_input=True))`, and greets the learner via `await session.generate_reply()`.
 - **`backend/main.py`** — `/livekit/token` endpoint issues a signed participant JWT and dispatches the `tablo-assistant` agent to the room on demand via `livekit_api.agent_dispatch.create_dispatch`.
 - **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects using the backend-issued token. `RoomAudioRenderer` plays AI voice audio. `VoiceAssistantControlBar` appears in the bottom bar when connected.
 - **Live board vision feed** — the frontend exports the `tldraw` page into PNG frames and publishes an offscreen-canvas video track into the LiveKit room, giving Gemini ongoing visual context.
-- **Deterministic board drawing** — the agent emits `board.command` events and the frontend applies them directly to `tldraw`.
-- **Target-aware drawing** — current command family supports absolute commands (`create_text`, `create_geo`, `create_arrow`) plus target-aware commands (`create_text_on_target`, `create_arrow_between_targets`) that resolve targets from selection, pointer, this/that references, or explicit `shape:<id>` refs.
-- **Key env vars:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`. The plugin reads `GOOGLE_API_KEY` specifically — `GEMINI_API_KEY` alone is not picked up.
-- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. The correct name for a standard Gemini API key is `gemini-2.5-flash-native-audio-preview-12-2025`.
+- **Key env vars:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`. The plugin reads `GOOGLE_API_KEY` specifically — `GEMINI_API_KEY` is aliased automatically in `agent.py` if only that is set.
+- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. Use `gemini-2.5-flash-native-audio-latest` (or the dated preview variant) for a standard Gemini API key.
 
-**End of Day 2 result:** a learner can open the board, click Connect, and have a real-time voice conversation with a Gemini-powered Socratic tutor, while the model sees a live board vision feed and can draw with deterministic, target-aware board commands.
+**End of Day 2 result:** a learner can open the board, click Connect, and have a real-time voice conversation with a Gemini-powered Socratic tutor, while the model sees a live board vision feed and can draw on the board.
+
+### AI Drawing Capabilities ✅ Shipped
+
+A full AI drawing system has been built on top of the `board.command` data topic. The agent exposes a single `execute_command` function tool and a `calculate` tool. The frontend validates, parses, and applies commands directly to `tldraw`.
+
+**Complete command set:**
+
+| Category | Commands |
+| --- | --- |
+| Text | `create_text`, `create_multiline_text`, `create_text_near_selection`, `create_formula`, `create_text_on_target` |
+| Geometry | `create_geo`, `create_arrow`, `create_arrow_between_targets`, `create_freehand`, `create_freehand_stroke` |
+| SVG | `create_svg` — agent writes raw SVG; frontend embeds it as a custom tldraw shape |
+| Math graphs | `create_graph` — agent provides expressions; frontend evaluates with `mathjs` and renders an accurate canvas plot |
+| Parametric graphs | `create_parametric_graph` — agent provides `exprX`/`exprY` as functions of `t` |
+| Regular polygons | `create_polygon` — mathematically precise n-gons and stars by circumradius |
+| Board state | `get_board_state`, `get_shape_info`, `match_shapes` |
+| Shape mutation | `update_shape`, `delete_shape`, `undo` |
+| Cleanup | `clear_board`, `clear_shapes`, `clear_region` |
+| Positioning | `get_position_info`, `calculate_position`, `get_distance`, `suggest_placement`, `place_with_collision_check` |
+| Labels | `create_side_label` (normal / inverted / side-inverted placement relative to a shape edge) |
+| Alignment | `snap_to_grid`, `snap_bounds_to_grid`, `align_shapes` |
+
+The frontend also includes a command validation layer that rejects malformed commands with typed error codes before execution, and logs all commands with success/failure status.
 
 ### Week 2: Socratic Interaction and Live Tutor Layer
 

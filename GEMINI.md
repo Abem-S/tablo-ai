@@ -4,35 +4,55 @@
 Tablo is a **voice-first, board-first** real-time Socratic AI whiteboard designed for collaborative learning. It aims to provide a shared thinking space where an AI tutor (powered by Gemini) guides learners through the Socratic method rather than just providing answers.
 
 ## Current Implemented Capabilities
+
 - **Realtime voice loop:** learner audio and AI audio run through LiveKit rooms with a backend-issued token.
 - **Live board vision:** the frontend exports the `tldraw` page as image frames, paints them into an offscreen canvas, and publishes that as a LiveKit video track.
 - **Gemini visual input:** the agent session is started with `room_io.RoomOptions(video_input=True)`, so Gemini Live can use the board feed during reasoning.
-- **Deterministic board drawing:** the backend agent emits `board.command` messages and the frontend applies them directly.
-- **Generalized targeting for drawing:** target-aware drawing supports `selection`, `pointer`, `this`, `that`, and `shape:<id>` target refs for more reliable placement.
-- **Implemented command families:**
-    - Absolute: `create_text`, `create_geo`, `create_arrow`
-    - Target-aware: `create_text_on_target`, `create_arrow_between_targets`
+- **Deterministic board drawing:** the backend agent emits `board.command` messages via `execute_command` tool and the frontend applies them directly to `tldraw`.
+- **`calculate` tool:** safe Python `eval` for arithmetic — the agent must use this instead of guessing math.
+- **Board state feedback:** `get_board_state` publishes a `board.response` data packet from the frontend; the agent waits up to 3 seconds for the reply.
+
+### Full Drawing Command Set
+
+The agent uses a single `execute_command(command_json)` tool. All commands share `v` (version) and `id` fields added automatically.
+
+| Category | Commands |
+| --- | --- |
+| Text | `create_text`, `create_multiline_text`, `create_text_near_selection`, `create_formula`, `create_text_on_target` |
+| Geometry | `create_geo` (rectangle/ellipse/diamond/triangle), `create_arrow`, `create_arrow_between_targets`, `create_freehand`, `create_freehand_stroke` |
+| SVG | `create_svg` — agent writes raw SVG; frontend embeds it as a custom tldraw shape |
+| Math graphs | `create_graph` — agent provides expressions (e.g. `sin(x)`, `x^2`); frontend evaluates with `mathjs` and renders an accurate canvas plot |
+| Parametric graphs | `create_parametric_graph` — agent provides `exprX`/`exprY` as functions of `t` |
+| Regular polygons | `create_polygon` — mathematically precise n-gons and stars by circumradius |
+| Board state | `get_board_state`, `get_shape_info`, `match_shapes` |
+| Shape mutation | `update_shape` (move/resize/relabel/recolor), `delete_shape`, `undo` |
+| Cleanup | `clear_board`, `clear_shapes`, `clear_region` |
+| Positioning | `get_position_info`, `calculate_position`, `get_distance`, `suggest_placement`, `place_with_collision_check` |
+| Labels | `create_side_label` (normal / inverted / side-inverted placement relative to a shape edge) |
+| Alignment | `snap_to_grid`, `snap_bounds_to_grid`, `align_shapes` |
+
+Target references (`BoardTargetRef`) supported across target-aware commands: `selection`, `pointer`, `this`, `that`, `shape:<id>`.
 
 ### Core Technologies
-- **Frontend:** Next.js 16 (App Router), React 19, Tailwind CSS 4, `tldraw` for the whiteboard canvas.
+- **Frontend:** Next.js 16 (App Router), React 19, Tailwind CSS 4, `tldraw` for the whiteboard canvas, `mathjs` for graph expression evaluation.
 - **Backend (API):** FastAPI for session management, token generation, and board state synchronization.
-- **Backend (Agent):** `livekit-agents` with `google-genai` (Gemini 2.5 Flash Native Audio) for real-time speech-to-speech interaction.
-- **Real-time Transport:** LiveKit (WebRTC) for audio and data tracks.
+- **Backend (Agent):** `livekit-agents` v1.5.x with `google.beta.realtime.RealtimeModel` (`gemini-2.5-flash-native-audio-latest`) for real-time speech-to-speech interaction.
+- **Real-time Transport:** LiveKit (WebRTC) for audio, video, and data tracks.
 - **Orchestration:** LangGraph (planned for complex tutoring policies and RAG).
 
 ## Building and Running
 
 ### Backend Setup
-1.  **Environment Variables:** Create a `.env` file in the `backend/` directory with:
+1. **Environment Variables:** Create a `.env` file in the `backend/` directory with:
     ```env
     LIVEKIT_URL=<your-livekit-url>
     LIVEKIT_API_KEY=<your-api-key>
     LIVEKIT_API_SECRET=<your-api-secret>
     GOOGLE_API_KEY=<your-gemini-api-key>
     ```
-    *Note: `GOOGLE_API_KEY` is required by the LiveKit Google plugin. `GEMINI_API_KEY` alone is not sufficient.*
+    *Note: `GOOGLE_API_KEY` is required by the LiveKit Google plugin. `GEMINI_API_KEY` is aliased to `GOOGLE_API_KEY` automatically in `agent.py` if only that is set.*
 
-2.  **Install Dependencies:**
+2. **Install Dependencies:**
     ```bash
     cd backend
     python -m venv venv
@@ -40,29 +60,29 @@ Tablo is a **voice-first, board-first** real-time Socratic AI whiteboard designe
     pip install -r requirements.txt
     ```
 
-3.  **Run FastAPI Server:**
+3. **Run FastAPI Server:**
     ```bash
     uvicorn main:app --reload
     ```
 
-4.  **Run LiveKit Agent:**
+4. **Run LiveKit Agent:**
     ```bash
     python agent.py dev
     ```
 
 ### Frontend Setup
-1.  **Install Dependencies:**
+1. **Install Dependencies:**
     ```bash
     cd frontend
     npm install
     ```
 
-2.  **Run Development Server:**
+2. **Run Development Server:**
     ```bash
     npm run dev
     ```
 
-    From the workspace root, use:
+    From the workspace root:
     ```bash
     npm --prefix frontend run dev
     ```
@@ -72,25 +92,30 @@ Tablo is a **voice-first, board-first** real-time Socratic AI whiteboard designe
 ### Non-Negotiable UX Rules
 - **Canvas-First:** The `tldraw` whiteboard must remain the primary surface.
 - **Voice-First:** Interaction should prioritize voice and board events. Avoid typical "chatbot" text interfaces.
-- **Socratic Tutoring:** The AI must guide, probe, and scaffold—never give final answers too early.
+- **Socratic Tutoring:** The AI must guide, probe, and scaffold — never give final answers too early.
 
 ### Backend Implementation Guardrails
 - **Agent API:** Using `livekit-agents` v1.5+. `AgentSession.start()` requires `agent=Agent(...)` and `room=ctx.room`.
-- **Model:** Use `gemini-2.5-flash-native-audio-preview-12-2025` for the standard Gemini API.
-- **Normalization:** The backend acts as the audio normalization boundary between LiveKit (48kHz) and Gemini (16kHz in, 24kHz out).
+- **Model namespace:** `google.beta.realtime.RealtimeModel` — note the `beta` namespace.
+- **Model name:** `gemini-2.5-flash-native-audio-latest` for the standard Gemini API. The Vertex AI name (`gemini-live-2.5-flash-native-audio`) is different.
+- **Single tool entry point:** all board drawing goes through `execute_command`. Do not add separate per-shape tools.
+- **Math:** always use the `calculate` tool — never let the model guess arithmetic.
+- **Normalization:** the backend acts as the audio normalization boundary between LiveKit (48 kHz) and Gemini (16 kHz in, 24 kHz out).
 
 ### Frontend Implementation Guardrails
-- **Layout:** Use full-screen or nearly full-screen board layouts. Keep overlays minimal.
-- **Next.js:** This project uses Next.js 16 with potential breaking changes. Always check `node_modules/next/dist/docs/` if unsure.
+- **Layout:** use full-screen or nearly full-screen board layouts. Keep overlays minimal.
+- **Command validation:** the frontend validates all commands before execution and returns typed error codes. Do not bypass this layer.
+- **SVG rules:** always use `fill='none'` and `stroke='black'`; always include a `viewBox`; for `<rect>` always include `x`, `y`, `width`, and `height`.
+- **Next.js:** this project uses Next.js 16 with potential breaking changes. Always check `node_modules/next/dist/docs/` if unsure.
 
 ### Architecture Guidelines
-- **Hot Path:** Real-time conversation and whiteboard responsiveness (direct Gemini Live loop).
-- **Warm Path:** Slower operations like RAG retrieval, tool execution, and memory updates via LangGraph.
-- **Interruption:** The system must support interruption; stale board actions from an interrupted turn should be discarded.
+- **Hot Path:** real-time conversation and whiteboard responsiveness (direct Gemini Live loop).
+- **Warm Path:** slower operations like RAG retrieval, tool execution, and memory updates via LangGraph.
+- **Interruption:** the system must support interruption; stale board actions from an interrupted turn should be discarded.
 
 ## Key Files
 - `backend/main.py`: FastAPI routes and session bootstrap.
-- `backend/agent.py`: LiveKit agent implementation using Gemini, including board-tool publishing.
-- `frontend/src/components/tablo-workspace.tsx`: Main whiteboard UI, board video publisher, board command bridge, and target-resolution logic.
+- `backend/agent.py`: LiveKit agent (`TabloAgent`), `execute_command` tool, `calculate` tool, board command publishing, and board state response handling.
+- `frontend/src/components/tablo-workspace.tsx`: Main whiteboard UI, board video publisher, full board command handler, command validation layer, board state manager, and position intelligence engine.
 - `AGENTS.md`: Detailed instructions and guardrails for AI agents working on this repo.
 - `README.md`: Comprehensive vision and architectural documentation.
