@@ -1,5 +1,10 @@
 # Local Env Files
 .env
+
+# Backend runtime data (uploads, vector store, knowledge graph)
+backend/data/uploads/
+backend/data/chromadb/
+backend/data/knowledge_graph.json
 .env.local
 .env.development.local
 .env.test.local

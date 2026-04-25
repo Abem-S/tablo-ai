@@ -10,6 +10,11 @@ from livekit.plugins import google
 
 load_dotenv()
 
+from rag.knowledge_graph import KnowledgeGraph
+from rag.ingestion import IngestionPipeline
+from rag.retrieval import RetrievalPipeline
+from rag.orchestrator import RAGOrchestrator
+
 # The livekit-plugins-google reads GOOGLE_API_KEY from env.
 # We alias GEMINI_API_KEY -> GOOGLE_API_KEY so both names work.
 if not os.getenv("GOOGLE_API_KEY") and os.getenv("GEMINI_API_KEY"):
@@ -19,11 +24,18 @@ logger = logging.getLogger("tablo-agent")
 
 
 class TabloAgent(Agent):
-    def __init__(self, room):
+    def __init__(self, room, retrieval=None, rag_orchestrator=None):
         super().__init__(
             instructions=(
                 "You are Tablo, a voice-first AI teacher on a collaborative whiteboard. "
                 "You teach by drawing on the board while speaking — like a real teacher at a blackboard.\n\n"
+
+                "DOCUMENT-GROUNDED TEACHING:\n"
+                "The learner may upload study materials (textbooks, lecture notes, PDFs). "
+                "When they ask about any subject-matter topic, ALWAYS call search_documents first "
+                "to check if their materials cover it. If relevant passages are found, base your "
+                "explanation on those passages and tell the learner you're referencing their materials. "
+                "Only fall back to general knowledge if search_documents returns nothing relevant.\n\n"
 
                 "CORE TEACHING BEHAVIOR:\n"
                 "1. When working through a problem, ALWAYS write each step on the board using execute_command. Say it AND write it.\n"
@@ -85,6 +97,8 @@ class TabloAgent(Agent):
             )
         )
         self._room = room
+        self._retrieval = retrieval
+        self._rag_orchestrator = rag_orchestrator
         self._pending_board_response = None  # type: asyncio.Future | None
 
     async def _publish_board_command(self, command: dict) -> None:
@@ -191,6 +205,57 @@ class TabloAgent(Agent):
             return f"Error: Invalid JSON - {str(e)}"
 
     @function_tool()
+    async def search_documents(
+        self,
+        context: RunContext,
+        query: str,
+    ) -> str:
+        """Search the learner's uploaded documents for relevant passages.
+
+        ALWAYS call this tool first when the learner asks about a topic that
+        might be covered in their uploaded study materials (textbooks, notes, PDFs).
+        Use it before answering any subject-matter question.
+
+        Args:
+            query: A concise keyword-rich search query describing what to look for.
+                   Examples: "OSI model layers", "TCP handshake", "data structures array"
+
+        Returns:
+            Relevant passages from the learner's documents, or a message indicating
+            no matching content was found.
+        """
+        try:
+            from rag.retrieval import RetrievalPipeline
+            from uuid import uuid4 as _uuid4
+            if self._retrieval is None:
+                return "No documents have been uploaded yet."
+
+            result = await self._retrieval.retrieve(
+                query=query,
+                turn_id=str(_uuid4()),
+                top_k=4,
+                threshold=0.25,
+            )
+
+            if result.context.is_general_knowledge or not result.context.context_text:
+                return "No relevant passages found in the uploaded documents for this query."
+
+            # Also publish sources to frontend for transparency
+            if self._rag_orchestrator is not None:
+                asyncio.create_task(
+                    self._rag_orchestrator.publish_sources(
+                        result.context.sources,
+                        turn_id=str(_uuid4()),
+                        is_general_knowledge=False,
+                    )
+                )
+
+            return f"Found {len(result.context.sources)} relevant passage(s) from the learner's documents:\n\n{result.context.context_text}"
+        except Exception as e:
+            logger.error("search_documents failed: %s", e)
+            return f"Document search failed: {e}"
+
+    @function_tool()
     async def calculate(
         self,
         context: RunContext,
@@ -264,6 +329,15 @@ async def entrypoint(ctx: JobContext):
 
     logger.info("Connected. Starting Gemini Live session...")
 
+    # Initialise RAG warm-path components
+    kg = KnowledgeGraph()
+    kg.load()
+    ingestion = IngestionPipeline(knowledge_graph=kg)
+    retrieval = RetrievalPipeline(
+        knowledge_graph=kg,
+        chroma_collection=ingestion._collection,
+    )
+
     model = google.beta.realtime.RealtimeModel(
         model="gemini-2.5-flash-native-audio-latest",
         voice="Aoede",
@@ -276,13 +350,29 @@ async def entrypoint(ctx: JobContext):
             "If the learner goes silent, proactively ask a follow-up question — never let the conversation die. "
             "After placing labels, verify with get_board_state and fix mistakes by deleting and redrawing. "
             "Don't write greetings on the board — only math, steps, diagrams. "
-            "Use calculate tool for arithmetic. Keep voice short."
+            "Use calculate tool for arithmetic. Keep voice short.\n\n"
+            "DOCUMENT GROUNDING: The learner may upload study materials. "
+            "When they ask about any subject-matter topic, call search_documents first. "
+            "If relevant passages are found, base your explanation on them and say you're referencing their materials. "
+            "Only use general knowledge if search_documents returns nothing relevant."
         ),
         temperature=0.8,
     )
 
     session = AgentSession(llm=model)
-    tablo_agent = TabloAgent(ctx.room)
+
+    # Create agent first with retrieval; wire orchestrator after
+    tablo_agent = TabloAgent(ctx.room, retrieval=retrieval, rag_orchestrator=None)
+
+    # Wire RAG orchestrator — warm path only, never blocks voice
+    rag_orchestrator = RAGOrchestrator(
+        retrieval_pipeline=retrieval,
+        tablo_agent=tablo_agent,
+        room=ctx.room,
+    )
+    rag_orchestrator.set_base_instructions(tablo_agent.instructions or "")
+    # Give the agent a reference back so search_documents can publish sources
+    tablo_agent._rag_orchestrator = rag_orchestrator
 
     await session.start(
         agent=tablo_agent,
@@ -302,6 +392,16 @@ async def entrypoint(ctx: JobContext):
     @session.on("user_speech_committed")
     def on_user_speech_committed(msg):
         logger.info("User speech committed: %s", msg)
+        # Fire RAG retrieval on warm path — never awaited, never blocks voice
+        transcript = getattr(msg, "text", "") or str(msg)
+        turn_id = str(uuid4())
+        asyncio.create_task(
+            rag_orchestrator.on_user_turn(
+                transcript=transcript,
+                board_summary="",  # board summary injected when available
+                turn_id=turn_id,
+            )
+        )
 
     @session.on("agent_speech_started")
     def on_agent_speech_started():
@@ -323,6 +423,9 @@ async def entrypoint(ctx: JobContext):
             if topic == "board.response":
                 payload = bytes(data_packet.data)
                 tablo_agent._on_board_response(payload)
+            elif topic == "tutor.sources":
+                # Backend echo — log for debugging only
+                logger.debug("tutor.sources echo received (backend no-op)")
         except Exception as e:
             logger.warning("Error handling data_received: %s", e)
 

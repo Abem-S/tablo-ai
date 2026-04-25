@@ -8,6 +8,8 @@ import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar, useRoomContex
 import { LocalVideoTrack, Track } from "livekit-client";
 import { create as createMathScope, evaluate as mathEvaluate } from "mathjs";
 import "@livekit/components-styles";
+import { SourcePanel, type SourceAttribution, type SourcesPayload } from "./source-panel";
+import { DocumentUploadButton } from "./document-upload";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -4599,11 +4601,13 @@ function BoardCommandBridge({
   editor,
   targetStateRef,
   boardStateRef,
+  onSourcesUpdate,
 }: {
   isConnected: boolean;
   editor: Editor | null;
   targetStateRef: { current: BoardTargetState };
   boardStateRef: { current: BoardState };
+  onSourcesUpdate?: (sources: SourceAttribution[], isGeneralKnowledge: boolean) => void;
 }) {
   const room = useRoomContext();
 
@@ -4616,7 +4620,19 @@ function BoardCommandBridge({
       _kind?: unknown,
       topic?: string
     ) => {
-      if (topic !== "board.command") return;
+      if (topic !== "board.command") {
+        // Handle tutor.sources for RAG source transparency
+        if (topic === "tutor.sources") {
+          try {
+            const rawText = new TextDecoder().decode(payload);
+            const sourcesPayload = JSON.parse(rawText) as SourcesPayload;
+            onSourcesUpdate?.(sourcesPayload.sources ?? [], sourcesPayload.is_general_knowledge ?? true);
+          } catch (e) {
+            console.warn("[SourcePanel] Failed to parse tutor.sources payload:", e);
+          }
+        }
+        return;
+      }
 
       try {
         const rawText = new TextDecoder().decode(payload);
@@ -4671,6 +4687,8 @@ export function TabloWorkspace() {
   const [roomState, setRoomState] = useState<
     "idle" | "connecting" | "connected" | "error"
   >("idle");
+  const [ragSources, setRagSources] = useState<SourceAttribution[]>([]);
+  const [ragIsGeneralKnowledge, setRagIsGeneralKnowledge] = useState(true);
   const [roomDetails, setRoomDetails] = useState<{
     roomName: string;
     participantIdentity: string;
@@ -4873,6 +4891,10 @@ export function TabloWorkspace() {
         editor={editor}
         targetStateRef={targetStateRef}
         boardStateRef={boardStateRef}
+        onSourcesUpdate={(sources, isGK) => {
+          setRagSources(sources);
+          setRagIsGeneralKnowledge(isGK);
+        }}
       />
       <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50">
         <div className="relative flex min-h-screen flex-col">
@@ -5008,6 +5030,13 @@ export function TabloWorkspace() {
         </section>
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 md:px-6 md:pb-6">
+          {/* Source transparency panel — only shown when connected */}
+          {roomState === "connected" && (
+            <SourcePanel
+              sources={ragSources}
+              isGeneralKnowledge={ragIsGeneralKnowledge}
+            />
+          )}
           <div className="pointer-events-auto mx-auto max-w-xl rounded-[30px] border border-white/10 bg-slate-950/70 px-4 py-3 shadow-[0_24px_80px_rgba(3,8,20,0.45)] backdrop-blur">
             <div className="flex items-center justify-between gap-4">
               <div className="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs text-slate-300">
@@ -5015,6 +5044,7 @@ export function TabloWorkspace() {
               </div>
               {roomState === "connected" ? (
                 <div className="flex items-center gap-3" data-lk-theme="default">
+                  <DocumentUploadButton />
                   <VoiceAssistantControlBar />
                   <button
                     className="rounded-full border border-rose-300/30 bg-rose-400/10 px-4 py-2 text-sm font-semibold text-rose-100"

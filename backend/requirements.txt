@@ -1,8 +1,13 @@
 fastapi
 uvicorn
 google-genai
+google-generativeai
 langgraph
 python-dotenv
 livekit-api
 livekit-agents[images]
 livekit-plugins-google
+chromadb
+pymupdf
+hypothesis
+python-multipart

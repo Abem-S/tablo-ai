@@ -1,13 +1,25 @@
 import os
+import shutil
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from rag.ingestion import IngestionPipeline
+from rag.knowledge_graph import KnowledgeGraph
+
+_UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "data", "uploads")
+os.makedirs(_UPLOADS_DIR, exist_ok=True)
+
+# Shared RAG instances (initialised once at startup)
+_kg = KnowledgeGraph()
+_kg.load()
+_ingestion = IngestionPipeline(knowledge_graph=_kg)
 
 
 app = FastAPI(
@@ -206,3 +218,85 @@ async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
         participant_identity=participant_identity,
         token=token,
     )
+
+
+# ---------------------------------------------------------------------------
+# Document management endpoints (RAG source material)
+# ---------------------------------------------------------------------------
+
+class DocumentMetadataResponse(BaseModel):
+    doc_id: str
+    name: str
+    chunk_count: int
+
+
+class IngestionResponse(BaseModel):
+    doc_id: str
+    name: str
+    chunk_count: int
+    concept_count: int
+    status: str
+    error_message: str | None = None
+
+
+@app.post("/documents/upload", response_model=IngestionResponse)
+async def upload_document(file: UploadFile = File(...)) -> IngestionResponse:
+    """Upload a PDF or TXT document and trigger the ingestion pipeline."""
+    filename = file.filename or "document"
+    ext = os.path.splitext(filename)[1].lower().lstrip(".")
+    if ext not in ("pdf", "txt"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported format '{ext}'. Supported: pdf, txt",
+        )
+
+    # Save upload to disk
+    save_path = os.path.join(_UPLOADS_DIR, f"{uuid4().hex}_{filename}")
+    try:
+        with open(save_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}") from e
+
+    # Run ingestion
+    try:
+        result = await _ingestion.ingest_document(file_path=save_path, doc_name=filename)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    if result.status == "failed":
+        raise HTTPException(status_code=500, detail=result.error_message or "Ingestion failed")
+
+    return IngestionResponse(
+        doc_id=result.doc_id,
+        name=filename,
+        chunk_count=result.chunk_count,
+        concept_count=result.concept_count,
+        status=result.status,
+        error_message=result.error_message,
+    )
+
+
+@app.get("/documents", response_model=list[DocumentMetadataResponse])
+def list_documents() -> list[DocumentMetadataResponse]:
+    """List all ingested documents."""
+    docs = _ingestion.list_documents()
+    return [
+        DocumentMetadataResponse(
+            doc_id=d["doc_id"],
+            name=d["name"],
+            chunk_count=d["chunk_count"],
+        )
+        for d in docs
+    ]
+
+
+@app.delete("/documents/{doc_id}")
+def delete_document(doc_id: str) -> dict[str, str]:
+    """Delete an ingested document and remove its chunks and concepts."""
+    removed = _ingestion.delete_document(doc_id)
+    if removed == 0:
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+    return {"status": "deleted", "doc_id": doc_id, "chunks_removed": str(removed)}
