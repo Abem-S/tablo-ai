@@ -10,6 +10,7 @@ from uuid import uuid4
 from .knowledge_graph import KnowledgeGraph
 from .models import (
     Chunk,
+    DiagramRecipe,
     RetrievalContext,
     RetrievalResult,
     ScoredChunk,
@@ -38,8 +39,8 @@ class RetrievalPipeline:
     # Vector search
     # ------------------------------------------------------------------
 
-    async def vector_search(self, query: str, top_k: int = 10) -> list[ScoredChunk]:
-        """Embed query and search ChromaDB. Returns empty list on timeout/error."""
+    async def vector_search(self, query: str, top_k: int = 10) -> tuple[list[ScoredChunk], list[dict]]:
+        """Embed query and search ChromaDB. Returns (scored_chunks, raw_metadatas)."""
         try:
             embedding = await asyncio.wait_for(
                 self._embed_query(query),
@@ -59,8 +60,6 @@ class RetrievalPipeline:
             for i, cid in enumerate(ids):
                 meta = metadatas[i]
                 distance = distances[i]
-                # ChromaDB cosine distance: 0 = identical, 2 = opposite
-                # Convert to similarity score 0–1
                 score = max(0.0, 1.0 - distance / 2.0)
                 chunk = Chunk(
                     chunk_id=meta.get("chunk_id", cid),
@@ -74,13 +73,13 @@ class RetrievalPipeline:
                     chunk_index=meta.get("chunk_index", 0),
                 )
                 scored.append(ScoredChunk(chunk=chunk, score=score, source="vector"))
-            return scored
+            return scored, metadatas
         except asyncio.TimeoutError:
             logger.warning("Vector search timed out after %.1fs", _RETRIEVAL_TIMEOUT_S)
-            return []
+            return [], []
         except Exception as e:
             logger.error("Vector search failed: %s", e)
-            return []
+            return [], []
 
     async def _embed_query(self, text: str) -> list[float]:
         from google import genai
@@ -180,11 +179,39 @@ class RetrievalPipeline:
         return fused
 
     # ------------------------------------------------------------------
+    # Diagram recipe collection
+    # ------------------------------------------------------------------
+
+    def _collect_diagram_recipes(self, raw_metadatas: list[dict]) -> list[DiagramRecipe]:
+        """Deserialise diagram_recipe from metadata, deduplicate by page_number."""
+        import json as _json
+        seen_pages: set[int] = set()
+        recipes: list[DiagramRecipe] = []
+        for meta in raw_metadatas:
+            raw = meta.get("diagram_recipe", "")
+            if not raw:
+                continue
+            try:
+                data = _json.loads(raw)
+                page = data["page_number"]
+                if page in seen_pages:
+                    continue
+                seen_pages.add(page)
+                recipes.append(DiagramRecipe(
+                    page_number=page,
+                    description=data["description"],
+                    image_b64=data.get("image_b64", ""),
+                ))
+            except Exception as e:
+                logger.warning("Failed to deserialise diagram_recipe: %s", e)
+        return recipes
+
+    # ------------------------------------------------------------------
     # Context assembly
     # ------------------------------------------------------------------
 
-    def assemble_context(self, chunks: list[ScoredChunk], turn_id: str) -> RetrievalContext:
-        """Build RetrievalContext with formatted text and SourceAttribution list."""
+    def assemble_context(self, chunks: list[ScoredChunk], turn_id: str, raw_metadatas: list[dict] | None = None) -> RetrievalContext:
+        """Build RetrievalContext with formatted text, SourceAttribution list, and diagram recipes."""
         if not chunks:
             return RetrievalContext(
                 turn_id=turn_id,
@@ -212,7 +239,6 @@ class RetrievalPipeline:
             )
             sources.append(source)
 
-            # Build context text for injection
             location = f"p.{chunk.page_number}" if chunk.page_number else "§"
             section = f" [{chunk.section_title}]" if chunk.section_title else ""
             context_parts.append(
@@ -220,11 +246,14 @@ class RetrievalPipeline:
             )
 
         context_text = "\n\n---\n\n".join(context_parts)
+        diagram_recipes = self._collect_diagram_recipes(raw_metadatas or [])
+
         return RetrievalContext(
             turn_id=turn_id,
             context_text=context_text,
             sources=sources,
             is_general_knowledge=False,
+            diagram_recipes=diagram_recipes,
         )
 
     # ------------------------------------------------------------------
@@ -241,7 +270,7 @@ class RetrievalPipeline:
         """Execute hybrid retrieval and return ranked chunks with attribution."""
         start = time.monotonic()
 
-        vector_results, graph_results = await asyncio.gather(
+        (vector_results, raw_metadatas), graph_results = await asyncio.gather(
             self.vector_search(query, top_k=top_k * 2),
             asyncio.to_thread(self.graph_search, query, top_k=top_k),
         )
@@ -253,7 +282,14 @@ class RetrievalPipeline:
         fused = self.rerank_rrf(vector_filtered, graph_filtered)
         top = fused[:top_k]
 
-        context = self.assemble_context(top, turn_id)
+        # Only pass metadatas for chunks that made it into the top results
+        top_chunk_ids = {sc.chunk.chunk_id for sc in top}
+        filtered_metadatas = [
+            m for sc, m in zip(vector_results, raw_metadatas)
+            if sc.chunk.chunk_id in top_chunk_ids
+        ]
+
+        context = self.assemble_context(top, turn_id, raw_metadatas=filtered_metadatas)
         elapsed_ms = (time.monotonic() - start) * 1000
 
         logger.info(

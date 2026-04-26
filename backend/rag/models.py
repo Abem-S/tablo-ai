@@ -5,6 +5,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
+@dataclass
+class DiagramRecipe:
+    """A diagram extracted from a PDF page."""
+    page_number: int          # 1-based page number from source PDF
+    description: str          # Natural-language description of the diagram
+    commands: list[dict] = None  # type: ignore  # Not stored at ingestion; generated on-demand
+    image_b64: str = ""       # Base64-encoded PNG of the page (stored at ingestion, used at draw time)
+
+
 class RelationType(str, Enum):
     PREREQUISITE = "prerequisite"
     RELATED_TOPIC = "related_topic"
@@ -69,6 +78,7 @@ class RetrievalContext:
     context_text: str
     sources: list[SourceAttribution]
     is_general_knowledge: bool
+    diagram_recipes: list[DiagramRecipe] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +101,7 @@ class IngestionResult:
     concept_count: int
     status: str           # "complete" | "failed"
     error_message: str | None = None
+    diagram_count: int = 0  # pages with successfully generated recipes
 
 
 @dataclass

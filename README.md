@@ -594,7 +594,7 @@ This should read as an execution plan for the architecture above, not just as a 
 
 What shipped:
 
-- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-latest"` (Gemini's native speech-to-speech model), starts an `AgentSession` with `await session.start(agent=TabloAgent(...), room=ctx.room, room_options=room_io.RoomOptions(video_input=True))`, and greets the learner via `await session.generate_reply()`.
+- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (use the dated preview, not `latest` — the `latest` alias rejects function calls with 1008 errors), starts an `AgentSession` with `await session.start(agent=TabloAgent(...), room=ctx.room, room_options=room_io.RoomOptions(video_input=True))`, and greets the learner via `await session.generate_reply()`.
 - **`backend/main.py`** — `/livekit/token` endpoint issues a signed participant JWT and dispatches the `tablo-assistant` agent to the room on demand via `livekit_api.agent_dispatch.create_dispatch`.
 - **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects using the backend-issued token. `RoomAudioRenderer` plays AI voice audio. `VoiceAssistantControlBar` appears in the bottom bar when connected.
 - **Live board vision feed** — the frontend exports the `tldraw` page into PNG frames and publishes an offscreen-canvas video track into the LiveKit room, giving Gemini ongoing visual context.
@@ -625,6 +625,17 @@ A full AI drawing system has been built on top of the `board.command` data topic
 | Alignment | `snap_to_grid`, `snap_bounds_to_grid`, `align_shapes` |
 
 The frontend also includes a command validation layer that rejects malformed commands with typed error codes before execution, and logs all commands with success/failure status.
+
+### RAG with Source Transparency and Diagram-Aware Ingestion ✅ Shipped
+
+A full hybrid RAG pipeline is implemented in `backend/rag/`:
+
+- **Hybrid retrieval:** vector search (ChromaDB + `gemini-embedding-2`, 3072-dim multimodal embeddings) + knowledge graph traversal, fused with Reciprocal Rank Fusion. Cosine similarity threshold applied before RRF.
+- **Two-phase ingestion:** `POST /documents/upload` returns immediately after text chunking and embedding. Diagram extraction runs as a background task — PDF pages rendered to PNG via PyMuPDF, sent to Gemini 2.5 Flash vision to extract diagram descriptions and store page images as base64.
+- **On-demand diagram drawing:** `draw_diagram(page_number)` tool fetches the stored page image and generates accurate tldraw commands from the actual visual — not from a text description.
+- **Context compression:** `search_documents` result compressed to ≤500 chars via gemini-2.5-flash before returning to Gemini Live, preventing 1008/1011 WebSocket disconnects.
+- **Source transparency:** retrieved sources published to frontend via `tutor.sources` LiveKit data topic; `SourcePanel` component shows document name, page, section, and relevance.
+- **Context window compression:** `ContextWindowCompressionConfig` with sliding window enabled on the RealtimeModel to prevent session context overflow in long sessions.
 
 ### Week 2: Socratic Interaction and Live Tutor Layer
 

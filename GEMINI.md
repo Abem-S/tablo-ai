@@ -11,6 +11,9 @@ Tablo is a **voice-first, board-first** real-time Socratic AI whiteboard designe
 - **Deterministic board drawing:** the backend agent emits `board.command` messages via `execute_command` tool and the frontend applies them directly to `tldraw`.
 - **`calculate` tool:** safe Python `eval` for arithmetic — the agent must use this instead of guessing math.
 - **Board state feedback:** `get_board_state` publishes a `board.response` data packet from the frontend; the agent waits up to 3 seconds for the reply.
+- **RAG with source transparency:** hybrid vector + knowledge graph retrieval from uploaded PDFs. Agent uses `search_documents` tool (result compressed to ≤500 chars) and `draw_diagram` tool (generates tldraw commands from stored page images via Gemini vision). Sources published to frontend via `tutor.sources` LiveKit topic.
+- **Diagram-aware ingestion:** PDF pages rendered to PNG at ingestion time; Gemini vision extracts diagram descriptions and stores page images as base64. Commands generated on-demand at draw time from the actual page image for accurate reproduction.
+- **Context window compression:** `ContextWindowCompressionConfig(trigger_tokens=25000, sliding_window=SlidingWindow(target_tokens=12000))` enabled on the RealtimeModel to prevent session context overflow.
 
 ### Full Drawing Command Set
 
@@ -36,9 +39,10 @@ Target references (`BoardTargetRef`) supported across target-aware commands: `se
 ### Core Technologies
 - **Frontend:** Next.js 16 (App Router), React 19, Tailwind CSS 4, `tldraw` for the whiteboard canvas, `mathjs` for graph expression evaluation.
 - **Backend (API):** FastAPI for session management, token generation, and board state synchronization.
-- **Backend (Agent):** `livekit-agents` v1.5.x with `google.beta.realtime.RealtimeModel` (`gemini-2.5-flash-native-audio-latest`) for real-time speech-to-speech interaction.
+- **Backend (Agent):** `livekit-agents` v1.5.x with `google.beta.realtime.RealtimeModel` (`gemini-2.5-flash-native-audio-preview-12-2025`) for real-time speech-to-speech interaction.
 - **Real-time Transport:** LiveKit (WebRTC) for audio, video, and data tracks.
-- **Orchestration:** LangGraph (planned for complex tutoring policies and RAG).
+- **RAG:** `google-genai` SDK, `gemini-embedding-2` (multimodal, 3072-dim), ChromaDB, PyMuPDF for PDF parsing and page image rendering.
+- **Orchestration:** LangGraph (planned for complex tutoring policies).
 
 ## Building and Running
 
@@ -97,7 +101,7 @@ Target references (`BoardTargetRef`) supported across target-aware commands: `se
 ### Backend Implementation Guardrails
 - **Agent API:** Using `livekit-agents` v1.5+. `AgentSession.start()` requires `agent=Agent(...)` and `room=ctx.room`.
 - **Model namespace:** `google.beta.realtime.RealtimeModel` — note the `beta` namespace.
-- **Model name:** `gemini-2.5-flash-native-audio-latest` for the standard Gemini API. The Vertex AI name (`gemini-live-2.5-flash-native-audio`) is different.
+- **Model name:** `gemini-2.5-flash-native-audio-preview-12-2025` for the standard Gemini API. Use the dated preview, **not** `latest` — the `latest` alias routes to a version that rejects function calls with 1008 errors. The Vertex AI name (`gemini-live-2.5-flash-native-audio`) is different.
 - **Single tool entry point:** all board drawing goes through `execute_command`. Do not add separate per-shape tools.
 - **Math:** always use the `calculate` tool — never let the model guess arithmetic.
 - **Normalization:** the backend acts as the audio normalization boundary between LiveKit (48 kHz) and Gemini (16 kHz in, 24 kHz out).
@@ -114,8 +118,14 @@ Target references (`BoardTargetRef`) supported across target-aware commands: `se
 - **Interruption:** the system must support interruption; stale board actions from an interrupted turn should be discarded.
 
 ## Key Files
-- `backend/main.py`: FastAPI routes and session bootstrap.
-- `backend/agent.py`: LiveKit agent (`TabloAgent`), `execute_command` tool, `calculate` tool, board command publishing, and board state response handling.
+- `backend/main.py`: FastAPI routes, session bootstrap, document upload/management endpoints.
+- `backend/agent.py`: LiveKit agent (`TabloAgent`), `execute_command`, `calculate`, `search_documents`, `draw_diagram` tools, board command publishing, and board state response handling.
+- `backend/rag/ingestion.py`: Two-phase PDF ingestion — fast text chunking + background diagram extraction.
+- `backend/rag/retrieval.py`: Hybrid vector + graph retrieval with RRF reranking and diagram recipe propagation.
+- `backend/rag/diagram_extractor.py`: PDF page rendering and Gemini vision diagram extraction.
+- `backend/rag/orchestrator.py`: Warm-path RAG orchestrator, source publishing to frontend.
 - `frontend/src/components/tablo-workspace.tsx`: Main whiteboard UI, board video publisher, full board command handler, command validation layer, board state manager, and position intelligence engine.
+- `frontend/src/components/source-panel.tsx`: RAG source transparency panel, listens on `tutor.sources` LiveKit topic.
+- `frontend/src/components/document-upload.tsx`: Document upload UI.
 - `AGENTS.md`: Detailed instructions and guardrails for AI agents working on this repo.
 - `README.md`: Comprehensive vision and architectural documentation.

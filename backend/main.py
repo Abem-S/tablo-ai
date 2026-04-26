@@ -6,7 +6,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -235,13 +235,21 @@ class IngestionResponse(BaseModel):
     name: str
     chunk_count: int
     concept_count: int
+    diagram_count: int = 0
     status: str
     error_message: str | None = None
 
 
 @app.post("/documents/upload", response_model=IngestionResponse)
-async def upload_document(file: UploadFile = File(...)) -> IngestionResponse:
-    """Upload a PDF or TXT document and trigger the ingestion pipeline."""
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+) -> IngestionResponse:
+    """Upload a PDF or TXT document and trigger the ingestion pipeline.
+
+    Text chunking and embedding complete synchronously.
+    Diagram extraction runs as a background task so the response is fast.
+    """
     filename = file.filename or "document"
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
     if ext not in ("pdf", "txt"):
@@ -258,9 +266,9 @@ async def upload_document(file: UploadFile = File(...)) -> IngestionResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}") from e
 
-    # Run ingestion
+    # Phase 1: parse → chunk → embed → store (fast, synchronous)
     try:
-        result = await _ingestion.ingest_document(file_path=save_path, doc_name=filename)
+        result = await _ingestion.ingest_document_fast(file_path=save_path, doc_name=filename)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
@@ -269,11 +277,20 @@ async def upload_document(file: UploadFile = File(...)) -> IngestionResponse:
     if result.status == "failed":
         raise HTTPException(status_code=500, detail=result.error_message or "Ingestion failed")
 
+    # Phase 2: diagram extraction runs in background (slow, non-blocking)
+    if ext == "pdf":
+        background_tasks.add_task(
+            _ingestion.extract_and_attach_diagrams,
+            file_path=save_path,
+            doc_id=result.doc_id,
+        )
+
     return IngestionResponse(
         doc_id=result.doc_id,
         name=filename,
         chunk_count=result.chunk_count,
         concept_count=result.concept_count,
+        diagram_count=0,  # diagrams processing in background
         status=result.status,
         error_message=result.error_message,
     )
@@ -300,3 +317,31 @@ def delete_document(doc_id: str) -> dict[str, str]:
     if removed == 0:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
     return {"status": "deleted", "doc_id": doc_id, "chunks_removed": str(removed)}
+
+
+@app.post("/documents/{doc_id}/extract-diagrams")
+async def extract_diagrams(doc_id: str, background_tasks: BackgroundTasks) -> dict[str, str]:
+    """Trigger diagram extraction for an already-ingested document.
+
+    Useful when a document was uploaded before diagram extraction was available.
+    Runs in the background — returns immediately.
+    """
+    # Find the uploaded file for this doc_id
+    results = _ingestion._collection.get(where={"doc_id": doc_id}, include=["metadatas"], limit=1)
+    if not results.get("ids"):
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+    doc_name = results["metadatas"][0].get("doc_name", "")
+    # Find the file on disk
+    upload_files = os.listdir(_UPLOADS_DIR)
+    matching = [f for f in upload_files if doc_name in f]
+    if not matching:
+        raise HTTPException(status_code=404, detail=f"Upload file for '{doc_name}' not found on disk")
+
+    file_path = os.path.join(_UPLOADS_DIR, matching[0])
+    background_tasks.add_task(
+        _ingestion.extract_and_attach_diagrams,
+        file_path=file_path,
+        doc_id=doc_id,
+    )
+    return {"status": "extraction_started", "doc_id": doc_id, "file": matching[0]}

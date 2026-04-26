@@ -16,6 +16,7 @@ from .models import (
     ChunkWithEmbedding,
     ConceptNode,
     ConceptRelationship,
+    DiagramRecipe,
     IngestionResult,
     RelationType,
 )
@@ -363,10 +364,43 @@ class IngestionPipeline:
         return nodes
 
     # ------------------------------------------------------------------
+    # Diagram extraction helpers
+    # ------------------------------------------------------------------
+
+    async def _extract_diagrams(self, file_path: str) -> dict[int, DiagramRecipe]:
+        """Run DiagramExtractor over all PDF pages. Returns empty dict on total failure (non-fatal)."""
+        try:
+            from .diagram_extractor import DiagramExtractor
+            extractor = DiagramExtractor(self._get_genai_client())
+            # Cap total diagram extraction time so uploads never hang indefinitely
+            return await asyncio.wait_for(extractor.extract_all(file_path), timeout=120.0)
+        except asyncio.TimeoutError:
+            logger.warning("Diagram extraction timed out after 120s — continuing without diagrams")
+            return {}
+        except Exception as e:
+            logger.warning("Diagram extraction failed entirely: %s — continuing without diagrams", e)
+            return {}
+
+    @staticmethod
+    def _serialise_recipe(recipe: DiagramRecipe | None) -> str:
+        """Serialise DiagramRecipe to JSON string, or return '' on failure/None."""
+        if recipe is None:
+            return ""
+        try:
+            return json.dumps({
+                "page_number": recipe.page_number,
+                "description": recipe.description,
+                "image_b64": recipe.image_b64 or "",
+            })
+        except Exception as e:
+            logger.error("Failed to serialise DiagramRecipe: %s", e)
+            return ""
+
+    # ------------------------------------------------------------------
     # Storage
     # ------------------------------------------------------------------
 
-    async def store(self, chunks: list[ChunkWithEmbedding], concepts: list[ConceptNode]) -> None:
+    async def store(self, chunks: list[ChunkWithEmbedding], concepts: list[ConceptNode], diagram_recipes: dict[int, DiagramRecipe] | None = None) -> None:
         """Write chunks to ChromaDB and concepts to KnowledgeGraph."""
         if not chunks:
             return
@@ -384,6 +418,9 @@ class IngestionPipeline:
                     "char_offset_start": c.chunk.char_offset_start,
                     "char_offset_end": c.chunk.char_offset_end,
                     "chunk_index": c.chunk.chunk_index,
+                    "diagram_recipe": self._serialise_recipe(
+                        diagram_recipes.get(c.chunk.page_number) if diagram_recipes and c.chunk.page_number is not None else None
+                    ),
                 }
                 for c in chunks
             ]
@@ -443,6 +480,96 @@ class IngestionPipeline:
     # Orchestration
     # ------------------------------------------------------------------
 
+    async def ingest_document_fast(self, file_path: str, doc_name: str) -> IngestionResult:
+        """Phase 1: parse → chunk → embed → extract concepts → store. No diagram extraction.
+
+        Returns quickly so the upload endpoint can respond immediately.
+        Diagram extraction is handled separately via extract_and_attach_diagrams.
+        """
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        if ext not in ("pdf", "txt"):
+            raise ValueError(f"Unsupported format '{ext}'. Supported: pdf, txt")
+
+        if ext == "pdf":
+            parsed = self.parse_pdf(file_path)
+        else:
+            parsed = self.parse_text(file_path)
+
+        if not parsed.pages:
+            raise ValueError("Document contains no extractable text")
+
+        chunks = self.chunk_document(parsed)
+        if not chunks:
+            raise ValueError("Document produced no chunks after parsing")
+
+        try:
+            chunks_with_embeddings = await self.generate_embeddings(chunks)
+        except RuntimeError as e:
+            return IngestionResult(
+                doc_id=parsed.doc_id,
+                chunk_count=0,
+                concept_count=0,
+                status="failed",
+                error_message=str(e),
+            )
+
+        concepts = await self.extract_concepts(chunks)
+        await self.store(chunks_with_embeddings, concepts, diagram_recipes=None)
+
+        try:
+            self._kg.save()
+        except Exception as e:
+            logger.warning("Failed to persist knowledge graph: %s", e)
+
+        return IngestionResult(
+            doc_id=parsed.doc_id,
+            chunk_count=len(chunks),
+            concept_count=len(concepts),
+            status="complete",
+            diagram_count=0,
+        )
+
+    async def extract_and_attach_diagrams(self, file_path: str, doc_id: str) -> None:
+        """Phase 2 (background): extract diagram recipes and update ChromaDB metadata.
+
+        Runs after ingest_document_fast completes. Updates existing chunk metadata
+        in-place with diagram_recipe JSON strings.
+        """
+        try:
+            diagram_recipes = await self._extract_diagrams(file_path)
+            if not diagram_recipes:
+                logger.info("No diagrams found for doc_id=%s", doc_id)
+                return
+
+            # Fetch all chunks for this doc from ChromaDB
+            results = self._collection.get(
+                where={"doc_id": doc_id},
+                include=["metadatas"],
+            )
+            ids = results.get("ids", [])
+            metadatas = results.get("metadatas", [])
+
+            if not ids:
+                logger.warning("No chunks found for doc_id=%s when attaching diagrams", doc_id)
+                return
+
+            # Update metadata with diagram recipes
+            updated_metadatas = []
+            for meta in metadatas:
+                page_num = meta.get("page_number", -1)
+                recipe = diagram_recipes.get(page_num) if page_num != -1 else None
+                updated_meta = dict(meta)
+                updated_meta["diagram_recipe"] = self._serialise_recipe(recipe)
+                updated_metadatas.append(updated_meta)
+
+            self._collection.update(ids=ids, metadatas=updated_metadatas)
+            logger.info(
+                "Attached %d diagram recipes to %d chunks for doc_id=%s",
+                len(diagram_recipes), len(ids), doc_id,
+            )
+        except Exception as e:
+            logger.error("Background diagram extraction failed for doc_id=%s: %s", doc_id, e)
+
     async def ingest_document(self, file_path: str, doc_name: str) -> IngestionResult:
         """Full pipeline: parse → chunk → embed → extract concepts → store."""
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
@@ -475,11 +602,16 @@ class IngestionPipeline:
                 error_message=str(e),
             )
 
+        # Extract diagrams (PDF only, non-fatal)
+        diagram_recipes: dict[int, DiagramRecipe] = {}
+        if ext == "pdf":
+            diagram_recipes = await self._extract_diagrams(file_path)
+
         # Extract concepts (non-fatal)
         concepts = await self.extract_concepts(chunks)
 
         # Store
-        await self.store(chunks_with_embeddings, concepts)
+        await self.store(chunks_with_embeddings, concepts, diagram_recipes=diagram_recipes)
 
         # Persist KG
         try:
@@ -492,4 +624,5 @@ class IngestionPipeline:
             chunk_count=len(chunks),
             concept_count=len(concepts),
             status="complete",
+            diagram_count=len(diagram_recipes),
         )

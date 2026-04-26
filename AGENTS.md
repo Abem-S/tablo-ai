@@ -70,12 +70,12 @@ For early implementation work:
 
 Day 2 shipped a working LiveKit + Gemini Live voice loop:
 
-- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-latest"`, starts an `AgentSession` with a `TabloAgent` instance, and calls `await session.generate_reply()` to greet the learner.
+- **`backend/agent.py`** — a `livekit-agents` v1.5.x worker registered as `tablo-assistant`. On job dispatch it connects to the room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"`, starts an `AgentSession` with a `TabloAgent` instance, and calls `await session.generate_reply()` to greet the learner.
 - **`backend/main.py`** — `/livekit/token` issues a signed participant JWT and dispatches `tablo-assistant` to the room via `livekit_api.agent_dispatch.create_dispatch`.
 - **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects with the token from the backend. `RoomAudioRenderer` plays AI audio. `VoiceAssistantControlBar` appears when connected.
 - **Vision now implemented** — the frontend renders the `tldraw` page to PNG frames and publishes a board video track through LiveKit; the agent session is started with `room_io.RoomOptions(video_input=True)` so Gemini Live receives ongoing board visuals.
 - **Key env vars required:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY` (the plugin reads `GOOGLE_API_KEY`, not `GEMINI_API_KEY`). `GEMINI_API_KEY` is aliased to `GOOGLE_API_KEY` automatically in `agent.py` if only the former is set.
-- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. The standard Gemini API key model is `gemini-2.5-flash-native-audio-latest` (or the dated preview variant).
+- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. The standard Gemini API key model is `gemini-2.5-flash-native-audio-preview-12-2025` (use the dated preview, not `latest`, for stable function-calling support).
 
 ### AI Drawing Capabilities — What is now implemented
 
@@ -126,6 +126,39 @@ A full AI drawing system has been built on top of the `board.command` data topic
 - The agent uses `google.beta.realtime.RealtimeModel` — note the `beta` namespace.
 - The `execute_command` tool is the single entry point for all board drawing. Do not add separate per-shape tools.
 - The `calculate` tool must be used for all arithmetic — never let the model guess math.
+
+### RAG System — What is now implemented
+
+A full hybrid RAG pipeline is implemented in `backend/rag/`:
+
+- **`ingestion.py`** — two-phase ingestion: `ingest_document_fast` (parse → chunk → embed → store, returns immediately) and `extract_and_attach_diagrams` (background task, vision-based diagram extraction).
+- **`retrieval.py`** — hybrid vector + knowledge graph search with RRF reranking. Cosine similarity threshold applied before RRF. Returns `RetrievalContext` with sources and diagram recipes.
+- **`orchestrator.py`** — warm-path orchestrator triggered on `user_speech_committed`. Publishes sources to frontend via `tutor.sources` LiveKit data topic.
+- **`diagram_extractor.py`** — renders PDF pages to PNG (PyMuPDF, 150 DPI, in-memory), calls Gemini 2.5 Flash vision to extract diagram descriptions and store page images as base64. At draw time, uses the actual page image to generate accurate tldraw commands.
+- **`models.py`** — `DiagramRecipe` (page_number, description, image_b64), `RetrievalContext` with `diagram_recipes`, `IngestionResult` with `diagram_count`.
+- **Embedding model:** `gemini-embedding-2` (multimodal, 3072-dim) via `google-genai` SDK.
+- **Generation model:** `gemini-2.5-flash` for concept extraction, query rewriting, context compression, and diagram command generation.
+- **ChromaDB** persisted at `backend/data/chromadb/`.
+
+**Agent tools for RAG:**
+- `search_documents(query)` — retrieves chunks, compresses result to ≤500 chars via gemini-2.5-flash to prevent Gemini Live 1008 disconnects, includes diagram hints.
+- `draw_diagram(page_number)` — fetches stored diagram recipe, generates tldraw commands from the actual page image via Gemini vision, publishes commands directly to `board.command` topic (bypasses Gemini Live context).
+
+**FastAPI endpoints:**
+- `POST /documents/upload` — fast ingest (returns in seconds), triggers background diagram extraction.
+- `GET /documents` — list ingested documents.
+- `DELETE /documents/{doc_id}` — remove document.
+- `POST /documents/{doc_id}/extract-diagrams` — re-trigger diagram extraction for an existing document.
+
+**Frontend:**
+- `DocumentUploadButton` — upload UI shown when connected.
+- `SourcePanel` — shows retrieved sources with relevance indicators, listens on `tutor.sources` LiveKit data topic.
+
+**Key implementation notes:**
+- Do NOT use `gemini-2.5-flash-native-audio-latest` — use `gemini-2.5-flash-native-audio-preview-12-2025`. The `latest` alias routes to a version that rejects function calls with 1008.
+- Tool results returned to Gemini Live must be ≤500 chars. Larger results cause 1008/1011 WebSocket disconnects.
+- `context_window_compression` is enabled on the RealtimeModel with `trigger_tokens=25000` and `target_tokens=12000` to prevent session context overflow.
+- The `google-genai` SDK (not the deprecated `google-generativeai`) is used for all Gemini calls in the RAG pipeline.
 
 ## Agent Behavior for This Repo
 

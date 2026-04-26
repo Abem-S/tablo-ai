@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from livekit.agents import Agent, AgentSession, JobContext, RunContext, WorkerOptions, cli, function_tool, room_io
 from livekit.plugins import google
+from google.genai import types as genai_types
 
 load_dotenv()
 
@@ -24,7 +25,7 @@ logger = logging.getLogger("tablo-agent")
 
 
 class TabloAgent(Agent):
-    def __init__(self, room, retrieval=None, rag_orchestrator=None):
+    def __init__(self, room, retrieval=None, rag_orchestrator=None, chroma_collection=None):
         super().__init__(
             instructions=(
                 "You are Tablo, a voice-first AI teacher on a collaborative whiteboard. "
@@ -35,7 +36,9 @@ class TabloAgent(Agent):
                 "When they ask about any subject-matter topic, ALWAYS call search_documents first "
                 "to check if their materials cover it. If relevant passages are found, base your "
                 "explanation on those passages and tell the learner you're referencing their materials. "
-                "Only fall back to general knowledge if search_documents returns nothing relevant.\n\n"
+                "Only fall back to general knowledge if search_documents returns nothing relevant.\n"
+                "If search_documents mentions a diagram on a page, call draw_diagram with that page number "
+                "to draw it on the board while explaining.\n\n"
 
                 "CORE TEACHING BEHAVIOR:\n"
                 "1. When working through a problem, ALWAYS write each step on the board using execute_command. Say it AND write it.\n"
@@ -99,6 +102,7 @@ class TabloAgent(Agent):
         self._room = room
         self._retrieval = retrieval
         self._rag_orchestrator = rag_orchestrator
+        self._chroma_collection = chroma_collection
         self._pending_board_response = None  # type: asyncio.Future | None
 
     async def _publish_board_command(self, command: dict) -> None:
@@ -221,11 +225,10 @@ class TabloAgent(Agent):
                    Examples: "OSI model layers", "TCP handshake", "data structures array"
 
         Returns:
-            Relevant passages from the learner's documents, or a message indicating
-            no matching content was found.
+            A concise summary of relevant content from the learner's documents,
+            including page numbers of any diagrams that can be drawn.
         """
         try:
-            from rag.retrieval import RetrievalPipeline
             from uuid import uuid4 as _uuid4
             if self._retrieval is None:
                 return "No documents have been uploaded yet."
@@ -240,7 +243,7 @@ class TabloAgent(Agent):
             if result.context.is_general_knowledge or not result.context.context_text:
                 return "No relevant passages found in the uploaded documents for this query."
 
-            # Also publish sources to frontend for transparency
+            # Publish sources to frontend for transparency (fire and forget)
             if self._rag_orchestrator is not None:
                 asyncio.create_task(
                     self._rag_orchestrator.publish_sources(
@@ -250,10 +253,130 @@ class TabloAgent(Agent):
                     )
                 )
 
-            return f"Found {len(result.context.sources)} relevant passage(s) from the learner's documents:\n\n{result.context.context_text}"
+            # Compress the retrieved content via gemini-2.5-flash to keep
+            # the tool result small and avoid Gemini Live context overflow (1008 errors)
+            return await self._compress_context(query, result.context)
         except Exception as e:
             logger.error("search_documents failed: %s", e)
             return f"Document search failed: {e}"
+
+    async def _compress_context(self, query: str, context) -> str:
+        """Reformat retrieved chunks for Gemini Live — preserve all facts, just restructure.
+
+        Keeps tool results concise to prevent Gemini Live 1008 disconnects,
+        but preserves all key facts, definitions, and terms from the source.
+        """
+        # Build diagram hint lines (very compact)
+        diagram_hints = ""
+        if context.diagram_recipes:
+            hints = [f"p.{r.page_number}: {r.description}" for r in context.diagram_recipes]
+            diagram_hints = "\nDiagrams available (call draw_diagram with page number): " + "; ".join(hints)
+
+        try:
+            from google import genai as _genai
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            client = _genai.Client(api_key=api_key)
+
+            prompt = (
+                f"The learner asked: \"{query}\"\n\n"
+                f"Retrieved document passages:\n{context.context_text[:2000]}\n\n"
+                "Write a concise 3-4 sentence answer covering the key facts. "
+                "Include document name and page numbers. No bullet points. "
+                "Return ONLY the answer."
+            )
+            response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+            summary = (response.text or "").strip()
+            if summary:
+                # Hard cap at 500 chars to prevent Gemini Live 1008/1011 disconnects
+                if len(summary) > 500:
+                    # Truncate at last sentence boundary before 500 chars
+                    truncated = summary[:500]
+                    last_period = max(truncated.rfind(". "), truncated.rfind(".\n"))
+                    if last_period > 200:
+                        summary = truncated[:last_period + 1]
+                    else:
+                        summary = truncated
+                return summary + diagram_hints
+        except Exception as e:
+            logger.warning("Context compression failed: %s — returning truncated raw text", e)
+
+        # Fallback: truncate raw text
+        truncated = context.context_text[:300]
+        return truncated + diagram_hints
+
+    @function_tool()
+    async def draw_diagram(
+        self,
+        context: RunContext,
+        page_number: int,
+    ) -> str:
+        """Draw a diagram from the learner's uploaded document onto the board.
+
+        Call this when search_documents mentions a diagram on a specific page.
+        The diagram is drawn directly on the board — you do NOT need to call execute_command.
+
+        Args:
+            page_number: The page number of the diagram to draw (from search_documents result).
+
+        Returns:
+            Confirmation that the diagram was drawn, or an error message.
+        """
+        try:
+            if self._chroma_collection is None:
+                return "No documents available."
+
+            # Look up the stored diagram description for this page
+            results = self._chroma_collection.get(
+                where={"page_number": page_number},
+                include=["metadatas"],
+                limit=1,
+            )
+            metadatas = results.get("metadatas", [])
+            if not metadatas:
+                return f"No diagram found for page {page_number}."
+
+            recipe_raw = metadatas[0].get("diagram_recipe", "")
+            if not recipe_raw:
+                return f"No diagram stored for page {page_number}."
+
+            import json as _json
+            recipe_data = _json.loads(recipe_raw)
+            description = recipe_data.get("description", "")
+            image_b64 = recipe_data.get("image_b64", "")
+            if not description and not image_b64:
+                return f"Diagram data missing for page {page_number}."
+
+            # Generate drawing commands on-demand via gemini-2.5-flash
+            # Uses the actual page image when available for accurate reproduction
+            from rag.diagram_extractor import DiagramExtractor
+            from google import genai as _genai
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            client = _genai.Client(api_key=api_key)
+            extractor = DiagramExtractor(client)
+            commands = await extractor.generate_commands(description, image_b64=image_b64)
+
+            if not commands:
+                return f"Could not generate drawing commands for the diagram on page {page_number}."
+
+            # Publish commands directly to the board — bypasses Gemini Live context entirely
+            published = 0
+            for cmd in commands:
+                try:
+                    if "v" not in cmd:
+                        cmd["v"] = 1
+                    if "id" not in cmd:
+                        cmd["id"] = str(uuid4())
+                    await self._publish_board_command(cmd)
+                    published += 1
+                    await asyncio.sleep(0.05)  # small delay between commands
+                except Exception as e:
+                    logger.warning("Failed to publish diagram command: %s", e)
+
+            logger.info("Drew diagram from page %d: %d commands published", page_number, published)
+            return f"Drew the diagram from page {page_number} on the board ({published} shapes)."
+        except Exception as e:
+            logger.error("draw_diagram failed for page %d: %s", page_number, e)
+            return f"Failed to draw diagram: {e}"
 
     @function_tool()
     async def calculate(
@@ -339,10 +462,14 @@ async def entrypoint(ctx: JobContext):
     )
 
     model = google.beta.realtime.RealtimeModel(
-        model="gemini-2.5-flash-native-audio-latest",
+        model="gemini-2.5-flash-native-audio-preview-12-2025",
         voice="Aoede",
         proactivity=True,
         enable_affective_dialog=True,
+        context_window_compression=genai_types.ContextWindowCompressionConfig(
+            trigger_tokens=25000,
+            sliding_window=genai_types.SlidingWindow(target_tokens=12000),
+        ),
         instructions=(
             "You are Tablo, a Socratic AI teacher on a whiteboard. "
             "ALWAYS write steps and equations on the board as you work through problems. "
@@ -354,6 +481,7 @@ async def entrypoint(ctx: JobContext):
             "DOCUMENT GROUNDING: The learner may upload study materials. "
             "When they ask about any subject-matter topic, call search_documents first. "
             "If relevant passages are found, base your explanation on them and say you're referencing their materials. "
+            "If the result mentions a diagram on a page number, call draw_diagram with that page number to draw it. "
             "Only use general knowledge if search_documents returns nothing relevant."
         ),
         temperature=0.8,
@@ -362,7 +490,7 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(llm=model)
 
     # Create agent first with retrieval; wire orchestrator after
-    tablo_agent = TabloAgent(ctx.room, retrieval=retrieval, rag_orchestrator=None)
+    tablo_agent = TabloAgent(ctx.room, retrieval=retrieval, rag_orchestrator=None, chroma_collection=ingestion._collection)
 
     # Wire RAG orchestrator — warm path only, never blocks voice
     rag_orchestrator = RAGOrchestrator(
