@@ -104,6 +104,7 @@ class TabloAgent(Agent):
         self._rag_orchestrator = rag_orchestrator
         self._chroma_collection = chroma_collection
         self._pending_board_response = None  # type: asyncio.Future | None
+        self._learner_context = None  # type: dict | None — {text, doc_name, page_number}
 
     async def _publish_board_command(self, command: dict) -> None:
         payload = json.dumps(command).encode("utf-8")
@@ -232,6 +233,12 @@ class TabloAgent(Agent):
             from uuid import uuid4 as _uuid4
             if self._retrieval is None:
                 return "No documents have been uploaded yet."
+
+            # Prepend learner context if they pointed to a specific passage
+            if self._learner_context:
+                lc = self._learner_context
+                query = f"[Learner is pointing to: \"{lc.get('text', '')[:200]}\" from {lc.get('doc_name', '')} p.{lc.get('page_number', '?')}] {query}"
+                self._learner_context = None  # consume once
 
             result = await self._retrieval.retrieve(
                 query=query,
@@ -554,6 +561,14 @@ async def entrypoint(ctx: JobContext):
             elif topic == "tutor.sources":
                 # Backend echo — log for debugging only
                 logger.debug("tutor.sources echo received (backend no-op)")
+            elif topic == "learner.context":
+                # Learner selected a passage in the document viewer
+                try:
+                    ctx_data = json.loads(bytes(data_packet.data).decode("utf-8"))
+                    tablo_agent._learner_context = ctx_data
+                    logger.info("Learner context received: %s p.%s", ctx_data.get("doc_name", ""), ctx_data.get("page_number", ""))
+                except Exception as e:
+                    logger.warning("Failed to parse learner.context: %s", e)
         except Exception as e:
             logger.warning("Error handling data_received: %s", e)
 

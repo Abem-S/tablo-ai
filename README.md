@@ -637,6 +637,21 @@ A full hybrid RAG pipeline is implemented in `backend/rag/`:
 - **Source transparency:** retrieved sources published to frontend via `tutor.sources` LiveKit data topic; `SourcePanel` component shows document name, page, section, and relevance.
 - **Context window compression:** `ContextWindowCompressionConfig` with sliding window enabled on the RealtimeModel to prevent session context overflow in long sessions.
 
+### Multi-Format Document Viewer Panel 🚧 In Progress
+
+A document viewer panel alongside the whiteboard, supporting 17 file formats with AI-triggered source navigation.
+
+**Backend (complete):**
+- `backend/rag/parsers.py` — per-format text extraction for docx (python-docx), pptx (python-pptx), rtf (striprtf), images (Gemini vision), xlsx/xls (openpyxl/xlrd), csv/tsv, html (BeautifulSoup), doc/hwp (fallback to Gemini vision).
+- File serving: `GET /documents/{doc_id}/file` (raw bytes) and `GET /documents/{doc_id}/text` (extracted text as JSON).
+- `tutor.sources` payload extended with `navigate_to` field for AI-triggered page navigation.
+- `learner.context` LiveKit data topic for learner-to-agent context sharing.
+
+**Frontend (partially complete):**
+- `DocumentViewerPanel` component with document list, basic PDF/image/text viewing.
+- Upload component accepts all 17 formats.
+- **Remaining:** replace iframe PDF viewer with `react-pdf` for page-by-page rendering, add page navigation, wire AI-triggered page jumping and text highlighting.
+
 ### Week 2: Socratic Interaction and Live Tutor Layer
 
 **Goal:** make the product behave like a tutor, not just an interface.

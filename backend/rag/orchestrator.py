@@ -158,6 +158,11 @@ class RAGOrchestrator:
                     }
                     for s in sources
                 ],
+                "navigate_to": {
+                    "doc_name": sources[0].document_name,
+                    "page_number": sources[0].page_number,
+                    "text_excerpt": sources[0].text_excerpt,
+                } if sources and not is_general_knowledge else None,
             }
             data = json.dumps(payload).encode("utf-8")
             await self._room.local_participant.publish_data(

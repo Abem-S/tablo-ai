@@ -480,6 +480,48 @@ class IngestionPipeline:
     # Orchestration
     # ------------------------------------------------------------------
 
+    # Supported formats and their parsers
+    _SUPPORTED_FORMATS = frozenset({
+        "pdf", "txt", "docx", "doc", "pptx", "rtf",
+        "png", "jpg", "jpeg", "webp", "heif",
+        "xlsx", "xls", "csv", "tsv", "html", "hwp",
+    })
+    _IMAGE_FORMATS = frozenset({"png", "jpg", "jpeg", "webp", "heif"})
+    _DIAGRAM_FORMATS = frozenset({"pdf"}) | _IMAGE_FORMATS
+
+    def _parse_by_format(self, file_path: str, ext: str) -> ParsedDocument:
+        """Dispatch to the correct parser based on file extension."""
+        from . import parsers
+
+        if ext == "pdf":
+            return self.parse_pdf(file_path)
+        elif ext == "txt":
+            return self.parse_text(file_path)
+        elif ext == "docx":
+            return parsers.parse_docx(file_path)
+        elif ext == "doc":
+            return parsers.parse_doc(file_path, self._get_genai_client())
+        elif ext == "pptx":
+            return parsers.parse_pptx(file_path)
+        elif ext == "rtf":
+            return parsers.parse_rtf(file_path)
+        elif ext in self._IMAGE_FORMATS:
+            return parsers.parse_image(file_path, self._get_genai_client())
+        elif ext == "xlsx":
+            return parsers.parse_xlsx(file_path)
+        elif ext == "xls":
+            return parsers.parse_xls(file_path)
+        elif ext == "csv":
+            return parsers.parse_csv_file(file_path, delimiter=",")
+        elif ext == "tsv":
+            return parsers.parse_csv_file(file_path, delimiter="\t")
+        elif ext == "html":
+            return parsers.parse_html(file_path)
+        elif ext == "hwp":
+            return parsers.parse_hwp(file_path, self._get_genai_client())
+        else:
+            raise ValueError(f"Unsupported format '{ext}'")
+
     async def ingest_document_fast(self, file_path: str, doc_name: str) -> IngestionResult:
         """Phase 1: parse → chunk → embed → extract concepts → store. No diagram extraction.
 
@@ -487,13 +529,11 @@ class IngestionPipeline:
         Diagram extraction is handled separately via extract_and_attach_diagrams.
         """
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-        if ext not in ("pdf", "txt"):
-            raise ValueError(f"Unsupported format '{ext}'. Supported: pdf, txt")
+        if ext not in self._SUPPORTED_FORMATS:
+            supported = ", ".join(sorted(self._SUPPORTED_FORMATS))
+            raise ValueError(f"Unsupported format '{ext}'. Supported: {supported}")
 
-        if ext == "pdf":
-            parsed = self.parse_pdf(file_path)
-        else:
-            parsed = self.parse_text(file_path)
+        parsed = self._parse_by_format(file_path, ext)
 
         if not parsed.pages:
             raise ValueError("Document contains no extractable text")
@@ -573,14 +613,11 @@ class IngestionPipeline:
     async def ingest_document(self, file_path: str, doc_name: str) -> IngestionResult:
         """Full pipeline: parse → chunk → embed → extract concepts → store."""
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-        if ext not in ("pdf", "txt"):
-            raise ValueError(f"Unsupported format '{ext}'. Supported: pdf, txt")
+        if ext not in self._SUPPORTED_FORMATS:
+            supported = ", ".join(sorted(self._SUPPORTED_FORMATS))
+            raise ValueError(f"Unsupported format '{ext}'. Supported: {supported}")
 
-        # Parse
-        if ext == "pdf":
-            parsed = self.parse_pdf(file_path)
-        else:
-            parsed = self.parse_text(file_path)
+        parsed = self._parse_by_format(file_path, ext)
 
         if not parsed.pages:
             raise ValueError("Document contains no extractable text")
@@ -602,9 +639,9 @@ class IngestionPipeline:
                 error_message=str(e),
             )
 
-        # Extract diagrams (PDF only, non-fatal)
+        # Extract diagrams (PDF and image formats only, non-fatal)
         diagram_recipes: dict[int, DiagramRecipe] = {}
-        if ext == "pdf":
+        if ext in self._DIAGRAM_FORMATS:
             diagram_recipes = await self._extract_diagrams(file_path)
 
         # Extract concepts (non-fatal)

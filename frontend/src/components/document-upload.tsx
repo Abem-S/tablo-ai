@@ -118,7 +118,7 @@ export function DocumentUploadButton() {
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
             <span style={{ fontWeight: 600, fontSize: "13px" }}>Source Documents</span>
-            <span style={{ color: "rgba(255,255,255,0.4)", fontSize: "11px" }}>PDF or TXT</span>
+            <span style={{ color: "rgba(255,255,255,0.4)", fontSize: "11px" }}>All formats</span>
           </div>
 
           {/* Upload button */}
@@ -139,7 +139,7 @@ export function DocumentUploadButton() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".pdf,.txt"
+              accept=".pdf,.txt,.docx,.doc,.pptx,.rtf,.png,.jpg,.jpeg,.webp,.heif,.xlsx,.xls,.csv,.tsv,.html,.hwp"
               style={{ display: "none" }}
               onChange={handleFileChange}
               disabled={uploading}

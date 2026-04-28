@@ -160,6 +160,28 @@ A full hybrid RAG pipeline is implemented in `backend/rag/`:
 - `context_window_compression` is enabled on the RealtimeModel with `trigger_tokens=25000` and `target_tokens=12000` to prevent session context overflow.
 - The `google-genai` SDK (not the deprecated `google-generativeai`) is used for all Gemini calls in the RAG pipeline.
 
+### Document Viewer Panel — What is now implemented (partial)
+
+A document viewer panel alongside the whiteboard is partially implemented. Backend is complete; frontend needs finishing.
+
+**Backend (complete):**
+- `backend/rag/parsers.py` — per-format text extraction handlers for 17 file types: pdf, txt, docx, doc, pptx, rtf, png, jpg, jpeg, webp, heif, xlsx, xls, csv, tsv, html, hwp.
+- `backend/rag/ingestion.py` — `_SUPPORTED_FORMATS` dispatch table routes each extension to its parser. `_DIAGRAM_FORMATS` controls which formats get background diagram extraction.
+- `backend/main.py` — `GET /documents/{doc_id}/file` serves raw file bytes with correct Content-Type. `GET /documents/{doc_id}/text` returns extracted plain text as JSON. Upload endpoint accepts all 17 formats.
+- `backend/rag/orchestrator.py` — `tutor.sources` payload includes `navigate_to` field with `{doc_name, page_number, text_excerpt}` from the highest-relevance source.
+- `backend/agent.py` — handles `learner.context` LiveKit data topic. Learner selections are prepended to the next `search_documents` query.
+
+**Frontend (partially complete — needs finishing in new session):**
+- `frontend/src/components/document-viewer-panel.tsx` — basic panel with document list, iframe PDF viewer, text viewer, image viewer. Wired into `tablo-workspace.tsx`.
+- `frontend/src/components/document-upload.tsx` — accepts all 17 formats.
+- **Needs:** replace iframe PDF viewer with `react-pdf` for page-by-page rendering, add page navigation controls, wire `activeNavigation.page_number` for AI-triggered page jumping, add text highlighting for `activeNavigation.text_excerpt`.
+- **Needs:** run `npm install` in `frontend/` to install `react-pdf`, `mammoth`, `xlsx`, `papaparse`.
+
+**Key implementation notes:**
+- The viewer panel is a secondary surface — it supports the board, not replaces it. Keep it collapsible.
+- `learner.context` is consumed once per `search_documents` call, then cleared.
+- File serving has path traversal prevention via `os.path.realpath` check.
+
 ## Agent Behavior for This Repo
 
 When making changes:

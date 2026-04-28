@@ -14,6 +14,9 @@ Tablo is a **voice-first, board-first** real-time Socratic AI whiteboard designe
 - **RAG with source transparency:** hybrid vector + knowledge graph retrieval from uploaded PDFs. Agent uses `search_documents` tool (result compressed to ≤500 chars) and `draw_diagram` tool (generates tldraw commands from stored page images via Gemini vision). Sources published to frontend via `tutor.sources` LiveKit topic.
 - **Diagram-aware ingestion:** PDF pages rendered to PNG at ingestion time; Gemini vision extracts diagram descriptions and stores page images as base64. Commands generated on-demand at draw time from the actual page image for accurate reproduction.
 - **Context window compression:** `ContextWindowCompressionConfig(trigger_tokens=25000, sliding_window=SlidingWindow(target_tokens=12000))` enabled on the RealtimeModel to prevent session context overflow.
+- **Multi-format document support:** 17 file types supported (pdf, txt, docx, doc, pptx, rtf, png, jpg, jpeg, webp, heif, xlsx, xls, csv, tsv, html, hwp). Per-format parsers in `backend/rag/parsers.py`. Images use Gemini vision for text extraction.
+- **Document viewer panel (partial):** collapsible side panel showing uploaded documents. Backend file serving complete (`/documents/{doc_id}/file`). Frontend needs `react-pdf` integration for page-by-page PDF rendering with AI-triggered page navigation.
+- **Learner context sharing:** learner can select text in the viewer and send it to the agent via `learner.context` LiveKit data topic.
 
 ### Full Drawing Command Set
 

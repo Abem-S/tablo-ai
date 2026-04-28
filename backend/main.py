@@ -8,6 +8,7 @@ load_dotenv()
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from rag.ingestion import IngestionPipeline
@@ -245,17 +246,19 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
 ) -> IngestionResponse:
-    """Upload a PDF or TXT document and trigger the ingestion pipeline.
+    """Upload a document and trigger the ingestion pipeline.
 
+    Supports: pdf, txt, docx, doc, pptx, rtf, png, jpg, jpeg, webp, heif, xlsx, xls, csv, tsv, html, hwp.
     Text chunking and embedding complete synchronously.
     Diagram extraction runs as a background task so the response is fast.
     """
     filename = file.filename or "document"
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
-    if ext not in ("pdf", "txt"):
+    if ext not in _ingestion._SUPPORTED_FORMATS:
+        supported = ", ".join(sorted(_ingestion._SUPPORTED_FORMATS))
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported format '{ext}'. Supported: pdf, txt",
+            detail=f"Unsupported format '{ext}'. Supported: {supported}",
         )
 
     # Save upload to disk
@@ -277,8 +280,8 @@ async def upload_document(
     if result.status == "failed":
         raise HTTPException(status_code=500, detail=result.error_message or "Ingestion failed")
 
-    # Phase 2: diagram extraction runs in background (slow, non-blocking)
-    if ext == "pdf":
+    # Phase 2: diagram extraction runs in background (PDF and images only)
+    if ext in _ingestion._DIAGRAM_FORMATS:
         background_tasks.add_task(
             _ingestion.extract_and_attach_diagrams,
             file_path=save_path,
@@ -345,3 +348,73 @@ async def extract_diagrams(doc_id: str, background_tasks: BackgroundTasks) -> di
         doc_id=doc_id,
     )
     return {"status": "extraction_started", "doc_id": doc_id, "file": matching[0]}
+
+
+# Content-Type mapping for file serving
+_MIME_TYPES = {
+    "pdf": "application/pdf",
+    "txt": "text/plain",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "doc": "application/msword",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "rtf": "application/rtf",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+    "heif": "image/heif",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "csv": "text/csv",
+    "tsv": "text/tab-separated-values",
+    "html": "text/html",
+    "hwp": "application/x-hwp",
+}
+
+
+def _find_upload_file(doc_id: str) -> tuple[str, str]:
+    """Find the uploaded file path for a doc_id. Returns (file_path, doc_name). Raises HTTPException on failure."""
+    results = _ingestion._collection.get(where={"doc_id": doc_id}, include=["metadatas"], limit=1)
+    if not results.get("ids"):
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+    doc_name = results["metadatas"][0].get("doc_name", "")
+    upload_files = os.listdir(_UPLOADS_DIR)
+    matching = [f for f in upload_files if doc_name in f]
+    if not matching:
+        raise HTTPException(status_code=404, detail=f"Upload file for '{doc_name}' not found on disk")
+
+    file_path = os.path.join(_UPLOADS_DIR, matching[0])
+    # Path traversal prevention
+    real_path = os.path.realpath(file_path)
+    real_uploads = os.path.realpath(_UPLOADS_DIR)
+    if not real_path.startswith(real_uploads):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return file_path, doc_name
+
+
+@app.get("/documents/{doc_id}/file")
+def get_document_file(doc_id: str):
+    """Serve the original uploaded file for client-side rendering."""
+    file_path, doc_name = _find_upload_file(doc_id)
+    ext = os.path.splitext(doc_name)[1].lower().lstrip(".")
+    media_type = _MIME_TYPES.get(ext, "application/octet-stream")
+    return FileResponse(file_path, media_type=media_type, filename=doc_name)
+
+
+@app.get("/documents/{doc_id}/text")
+def get_document_text(doc_id: str) -> dict:
+    """Return extracted plain text for formats that need server-side text extraction."""
+    results = _ingestion._collection.get(where={"doc_id": doc_id}, include=["documents", "metadatas"])
+    if not results.get("ids"):
+        raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+    # Combine all chunk texts in order
+    chunks = list(zip(results["metadatas"], results["documents"]))
+    chunks.sort(key=lambda x: x[0].get("chunk_index", 0))
+    full_text = "\n\n".join(doc for _, doc in chunks)
+    doc_name = chunks[0][0].get("doc_name", "") if chunks else ""
+    ext = os.path.splitext(doc_name)[1].lower().lstrip(".")
+
+    return {"doc_id": doc_id, "doc_name": doc_name, "format": ext, "text": full_text}

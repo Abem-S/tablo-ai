@@ -10,6 +10,7 @@ import { create as createMathScope, evaluate as mathEvaluate } from "mathjs";
 import "@livekit/components-styles";
 import { SourcePanel, type SourceAttribution, type SourcesPayload } from "./source-panel";
 import { DocumentUploadButton } from "./document-upload";
+import { DocumentViewerPanel, type DocumentMeta, type NavigationTarget, type LearnerSelection } from "./document-viewer-panel";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -4602,12 +4603,14 @@ function BoardCommandBridge({
   targetStateRef,
   boardStateRef,
   onSourcesUpdate,
+  pendingLearnerContextRef,
 }: {
   isConnected: boolean;
   editor: Editor | null;
   targetStateRef: { current: BoardTargetState };
   boardStateRef: { current: BoardState };
-  onSourcesUpdate?: (sources: SourceAttribution[], isGeneralKnowledge: boolean) => void;
+  onSourcesUpdate?: (sources: SourceAttribution[], isGeneralKnowledge: boolean, navigateTo: NavigationTarget | null) => void;
+  pendingLearnerContextRef: { current: LearnerSelection | null };
 }) {
   const room = useRoomContext();
 
@@ -4625,8 +4628,8 @@ function BoardCommandBridge({
         if (topic === "tutor.sources") {
           try {
             const rawText = new TextDecoder().decode(payload);
-            const sourcesPayload = JSON.parse(rawText) as SourcesPayload;
-            onSourcesUpdate?.(sourcesPayload.sources ?? [], sourcesPayload.is_general_knowledge ?? true);
+            const sourcesPayload = JSON.parse(rawText) as SourcesPayload & { navigate_to?: NavigationTarget };
+            onSourcesUpdate?.(sourcesPayload.sources ?? [], sourcesPayload.is_general_knowledge ?? true, sourcesPayload.navigate_to ?? null);
           } catch (e) {
             console.warn("[SourcePanel] Failed to parse tutor.sources payload:", e);
           }
@@ -4656,10 +4659,24 @@ function BoardCommandBridge({
     };
 
     room.on("dataReceived", onDataReceived);
+
+    // Poll for pending learner context selections and publish them
+    const learnerContextInterval = window.setInterval(() => {
+      const pending = pendingLearnerContextRef.current;
+      if (!pending) return;
+      pendingLearnerContextRef.current = null;
+      const data = JSON.stringify(pending);
+      room.localParticipant.publishData(
+        new TextEncoder().encode(data),
+        { reliable: true, topic: "learner.context" }
+      ).catch((e) => console.warn("[BoardCommandBridge] Failed to publish learner.context:", e));
+    }, 200);
+
     return () => {
       room.off("dataReceived", onDataReceived);
+      window.clearInterval(learnerContextInterval);
     };
-  }, [editor, isConnected, room, targetStateRef]);
+  }, [editor, isConnected, room, targetStateRef, pendingLearnerContextRef]);
 
   return null;
 }
@@ -4674,6 +4691,7 @@ export function TabloWorkspace() {
     lastBoardStateResponse: null,
   });
   const boardStateRef = useRef<BoardState>(createBoardState());
+  const pendingLearnerContextRef = useRef<LearnerSelection | null>(null);
   const [session, setSession] = useState<SessionBootstrap | null>(null);
   const [boardMetrics, setBoardMetrics] = useState<BoardMetrics>(() =>
     getBoardMetrics(null)
@@ -4689,6 +4707,8 @@ export function TabloWorkspace() {
   >("idle");
   const [ragSources, setRagSources] = useState<SourceAttribution[]>([]);
   const [ragIsGeneralKnowledge, setRagIsGeneralKnowledge] = useState(true);
+  const [viewerDocuments, setViewerDocuments] = useState<DocumentMeta[]>([]);
+  const [activeNavigation, setActiveNavigation] = useState<NavigationTarget | null>(null);
   const [roomDetails, setRoomDetails] = useState<{
     roomName: string;
     participantIdentity: string;
@@ -4734,6 +4754,15 @@ export function TabloWorkspace() {
           setSession(sessionData);
           setRealtimeConfig(realtimeData);
           setStatus("ready");
+
+          // Fetch document list
+          try {
+            const docsRes = await fetch(`${API_BASE_URL}/documents`);
+            if (docsRes.ok) {
+              const docs = await docsRes.json();
+              if (!cancelled) setViewerDocuments(docs);
+            }
+          } catch { /* non-fatal */ }
         }
       } catch (error) {
         if (!cancelled) {
@@ -4891,9 +4920,13 @@ export function TabloWorkspace() {
         editor={editor}
         targetStateRef={targetStateRef}
         boardStateRef={boardStateRef}
-        onSourcesUpdate={(sources, isGK) => {
+        pendingLearnerContextRef={pendingLearnerContextRef}
+        onSourcesUpdate={(sources, isGK, navigateTo) => {
           setRagSources(sources);
           setRagIsGeneralKnowledge(isGK);
+          if (navigateTo) {
+            setActiveNavigation(navigateTo);
+          }
         }}
       />
       <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50">
@@ -4904,6 +4937,22 @@ export function TabloWorkspace() {
             <div className="absolute inset-0">
               <Tldraw onMount={setEditor} autoFocus shapeUtils={svgShapeUtils} />
             </div>
+            {/* Document viewer panel — overlays on the right side of the canvas */}
+            <DocumentViewerPanel
+              documents={viewerDocuments}
+              activeNavigation={activeNavigation}
+              isConnected={roomState === "connected"}
+              onLearnerSelection={(selection) => {
+                if (roomState !== "connected") return;
+                pendingLearnerContextRef.current = selection;
+              }}
+              onRefreshDocuments={() => {
+                fetch(`${API_BASE_URL}/documents`)
+                  .then((r) => r.json())
+                  .then(setViewerDocuments)
+                  .catch(() => {});
+              }}
+            />
           </div>
 
           <aside className="hidden w-[380px] shrink-0 border-l border-white/10 bg-slate-950/62 p-4 backdrop-blur xl:flex xl:flex-col">

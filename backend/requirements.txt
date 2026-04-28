@@ -11,3 +11,9 @@ chromadb
 pymupdf
 hypothesis
 python-multipart
+python-docx
+python-pptx
+openpyxl
+xlrd
+striprtf
+beautifulsoup4

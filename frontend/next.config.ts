@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
   experimental: {
     webpackBuildWorker: false,
   },
+  // Turbopack is the default in Next.js 16 — empty config silences the warning
+  turbopack: {},
 };
 
 export default nextConfig;
