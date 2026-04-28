@@ -1,4 +1,8 @@
-"""Document ingestion pipeline: parse → chunk → embed → extract concepts → store."""
+"""Document ingestion pipeline: parse → chunk → embed → extract concepts → store.
+
+Vector store: Qdrant (self-hosted or Qdrant Cloud).
+Collection per user: tablo_{user_id} or tablo_shared for single-user mode.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -20,11 +24,10 @@ from .models import (
     IngestionResult,
     RelationType,
 )
+from . import vector_store as vs
 
 logger = logging.getLogger("tablo-rag.ingestion")
 
-_CHROMA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "chromadb")
-_COLLECTION_NAME = "tablo_chunks"
 _HIGH_RELEVANCE_THRESHOLD = 0.7
 _MAX_CHUNK_CHARS = 1200
 _MIN_CHUNK_CHARS = 100
@@ -49,36 +52,28 @@ class ParsedDocument:
 
 
 class IngestionPipeline:
-    """Offline document ingestion: parse → chunk → embed → store."""
+    """Offline document ingestion: parse → chunk → embed → store in Qdrant."""
 
-    def __init__(self, knowledge_graph: KnowledgeGraph) -> None:
+    def __init__(self, knowledge_graph: KnowledgeGraph, user_id: str | None = None) -> None:
         self._kg = knowledge_graph
-        self._chroma_client = None
-        self._collection = None
-        self._doc_metadata: dict[str, dict] = {}  # doc_id -> metadata dict
-        self._init_chroma()
+        self._user_id = user_id
+        self._collection = vs.collection_name(user_id)
+        self._client = vs._get_client()
+        self._ensure_collection()
 
-    def _init_chroma(self) -> None:
+    def _ensure_collection(self) -> None:
         try:
-            import chromadb
-            os.makedirs(_CHROMA_PATH, exist_ok=True)
-            self._chroma_client = chromadb.PersistentClient(path=_CHROMA_PATH)
-            self._collection = self._chroma_client.get_or_create_collection(
-                name=_COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"},
-            )
-            logger.info("ChromaDB initialised at %s (collection: %s)", _CHROMA_PATH, _COLLECTION_NAME)
+            vs.ensure_collection(self._client, self._collection)
+            logger.info("Qdrant ready — collection: %s", self._collection)
         except Exception as e:
-            logger.error("Failed to initialise ChromaDB: %s", e)
+            logger.error("Failed to connect to Qdrant at %s: %s",
+                         os.getenv("QDRANT_URL", "http://localhost:6333"), e)
             raise
 
     @staticmethod
     def _get_genai_client():
-        """Return a configured google.genai Client."""
         from google import genai
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            logger.warning("No GOOGLE_API_KEY or GEMINI_API_KEY found — Gemini calls will fail")
         return genai.Client(api_key=api_key)
 
     # ------------------------------------------------------------------
@@ -86,11 +81,10 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
 
     def parse_pdf(self, file_path: str) -> ParsedDocument:
-        """Extract text with page/section structure using PyMuPDF."""
         try:
-            import fitz  # PyMuPDF
+            import fitz
         except ImportError as exc:
-            raise RuntimeError("PyMuPDF (fitz) is not installed. Run: pip install pymupdf") from exc
+            raise RuntimeError("PyMuPDF (fitz) is not installed.") from exc
 
         doc_name = os.path.basename(file_path)
         doc_id = str(uuid4())
@@ -110,7 +104,7 @@ class IngestionPipeline:
                 page_text_parts: list[str] = []
 
                 for block in blocks:
-                    if block.get("type") != 0:  # 0 = text block
+                    if block.get("type") != 0:
                         continue
                     for line in block.get("lines", []):
                         for span in line.get("spans", []):
@@ -120,7 +114,6 @@ class IngestionPipeline:
                             font_size = span.get("size", 0)
                             flags = span.get("flags", 0)
                             is_bold = bool(flags & 2**4)
-                            # Heuristic: large or bold text at start of block = section heading
                             if font_size >= 14 or (is_bold and font_size >= 12):
                                 if section_title is None:
                                     section_title = text
@@ -142,19 +135,11 @@ class IngestionPipeline:
                 raise ValueError(f"Failed to parse PDF '{doc_name}' at page {page_num + 1}: {e}") from e
 
         pdf.close()
-        return ParsedDocument(
-            doc_id=doc_id,
-            doc_name=doc_name,
-            format="pdf",
-            pages=pages,
-            total_chars=char_offset,
-        )
+        return ParsedDocument(doc_id=doc_id, doc_name=doc_name, format="pdf", pages=pages, total_chars=char_offset)
 
     def parse_text(self, file_path: str) -> ParsedDocument:
-        """Parse plain text preserving paragraph structure."""
         doc_name = os.path.basename(file_path)
         doc_id = str(uuid4())
-
         try:
             with open(file_path, encoding="utf-8") as f:
                 content = f.read()
@@ -170,11 +155,9 @@ class IngestionPipeline:
             para = para.strip()
             if not para:
                 continue
-            # Detect section headings: all-caps line or line ending with colon
             first_line = para.split("\n")[0].strip()
             if first_line.isupper() or first_line.endswith(":"):
                 section_title = first_line
-
             start = char_offset
             end = char_offset + len(para)
             pages.append(ParsedPage(
@@ -184,27 +167,19 @@ class IngestionPipeline:
                 char_offset_start=start,
                 char_offset_end=end,
             ))
-            char_offset = end + 2  # account for double newline
+            char_offset = end + 2
 
-        return ParsedDocument(
-            doc_id=doc_id,
-            doc_name=doc_name,
-            format="txt",
-            pages=pages,
-            total_chars=char_offset,
-        )
+        return ParsedDocument(doc_id=doc_id, doc_name=doc_name, format="txt", pages=pages, total_chars=char_offset)
 
     # ------------------------------------------------------------------
     # Chunking
     # ------------------------------------------------------------------
 
     def chunk_document(self, parsed: ParsedDocument) -> list[Chunk]:
-        """Split into semantic chunks respecting section/paragraph boundaries."""
         chunks: list[Chunk] = []
         chunk_index = 0
 
         for page in parsed.pages:
-            # Split page text into sentences, then group into chunks
             sentences = self._split_sentences(page.text)
             current_sentences: list[str] = []
             current_len = 0
@@ -213,7 +188,6 @@ class IngestionPipeline:
             for sentence in sentences:
                 sentence_len = len(sentence)
                 if current_len + sentence_len > _MAX_CHUNK_CHARS and current_sentences:
-                    # Flush current chunk
                     chunk_text = " ".join(current_sentences)
                     chunks.append(Chunk(
                         chunk_id=str(uuid4()),
@@ -230,11 +204,9 @@ class IngestionPipeline:
                     current_offset += len(chunk_text) + 1
                     current_sentences = []
                     current_len = 0
-
                 current_sentences.append(sentence)
                 current_len += sentence_len + 1
 
-            # Flush remaining sentences
             if current_sentences:
                 chunk_text = " ".join(current_sentences)
                 if len(chunk_text) >= _MIN_CHUNK_CHARS:
@@ -254,8 +226,6 @@ class IngestionPipeline:
         return chunks
 
     def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences without breaking mid-sentence."""
-        # Simple sentence splitter on . ! ? followed by whitespace
         parts = re.split(r"(?<=[.!?])\s+", text.strip())
         return [p.strip() for p in parts if p.strip()]
 
@@ -264,16 +234,14 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
 
     async def generate_embeddings(self, chunks: list[Chunk]) -> list[ChunkWithEmbedding]:
-        """Generate embeddings via gemini-embedding-2 (multimodal) with retry."""
         results: list[ChunkWithEmbedding] = []
         for chunk in chunks:
-            embedding = await self._embed_with_retry(chunk.text, task_type="RETRIEVAL_DOCUMENT")
+            embedding = await self._embed_text_with_retry(chunk.text, task_type="RETRIEVAL_DOCUMENT")
             results.append(ChunkWithEmbedding(chunk=chunk, embedding=embedding))
         return results
 
-    async def _embed_with_retry(self, text: str, task_type: str, retries: int = 2) -> list[float]:
+    async def _embed_text_with_retry(self, text: str, task_type: str, retries: int = 2) -> list[float]:
         from google.genai import types as genai_types
-
         client = self._get_genai_client()
         delay = 1.0
         last_error: Exception | None = None
@@ -291,18 +259,39 @@ class IngestionPipeline:
                     logger.warning("Embedding attempt %d failed: %s — retrying in %.1fs", attempt + 1, e, delay)
                     await asyncio.sleep(delay)
                     delay *= 2
-        raise RuntimeError(f"Embedding generation failed after {retries + 1} attempts: {last_error}") from last_error
+        raise RuntimeError(f"Embedding failed after {retries + 1} attempts: {last_error}") from last_error
+
+    async def embed_image(self, image_b64: str) -> list[float] | None:
+        """Embed a base64 PNG image using gemini-embedding-2 multimodal capability.
+
+        Returns None on failure (non-fatal — text embedding is the primary signal).
+        """
+        try:
+            from google import genai as _genai
+            from google.genai import types as genai_types
+            client = self._get_genai_client()
+            # gemini-embedding-2 accepts inline image parts
+            image_part = genai_types.Part.from_bytes(
+                data=__import__("base64").b64decode(image_b64),
+                mime_type="image/png",
+            )
+            response = client.models.embed_content(
+                model="gemini-embedding-2",
+                contents=image_part,
+                config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            )
+            return response.embeddings[0].values
+        except Exception as e:
+            logger.warning("Image embedding failed (non-fatal): %s", e)
+            return None
 
     # ------------------------------------------------------------------
     # Concept extraction
     # ------------------------------------------------------------------
 
     async def extract_concepts(self, chunks: list[Chunk]) -> list[ConceptNode]:
-        """Extract concept nodes and relationships using Gemini Flash."""
         if not chunks:
             return []
-
-        # Build a sample of text to extract concepts from (first 3000 chars)
         sample_text = "\n\n".join(c.text for c in chunks[:10])[:3000]
         prompt = (
             "Extract the key educational concepts from the following text. "
@@ -313,15 +302,10 @@ class IngestionPipeline:
             "Return ONLY valid JSON, no markdown.\n\n"
             f"Text:\n{sample_text}"
         )
-
         try:
             client = self._get_genai_client()
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
+            response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
             raw = response.text.strip() if response.text else ""
-            # Strip markdown code fences if present
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
             concept_data = json.loads(raw)
@@ -338,21 +322,11 @@ class IngestionPipeline:
                 continue
             cid = str(uuid4())
             name_to_id[name.lower()] = cid
-            # Associate with chunks that mention this concept
-            related_chunk_ids = [
-                c.chunk_id for c in chunks
-                if name.lower() in c.text.lower()
-            ]
-            node = ConceptNode(
-                concept_id=cid,
-                name=name,
-                doc_id=chunks[0].doc_id,
-                chunk_ids=related_chunk_ids,
-            )
+            related_chunk_ids = [c.chunk_id for c in chunks if name.lower() in c.text.lower()]
+            node = ConceptNode(concept_id=cid, name=name, doc_id=chunks[0].doc_id, chunk_ids=related_chunk_ids)
             nodes.append(node)
             self._kg.add_concept(node)
 
-        # Add relationships
         for item, node in zip(concept_data, nodes):
             for rel in item.get("relationships", []):
                 target_name = rel.get("target", "").strip().lower()
@@ -368,22 +342,19 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
 
     async def _extract_diagrams(self, file_path: str) -> dict[int, DiagramRecipe]:
-        """Run DiagramExtractor over all PDF pages. Returns empty dict on total failure (non-fatal)."""
         try:
             from .diagram_extractor import DiagramExtractor
             extractor = DiagramExtractor(self._get_genai_client())
-            # Cap total diagram extraction time so uploads never hang indefinitely
             return await asyncio.wait_for(extractor.extract_all(file_path), timeout=120.0)
         except asyncio.TimeoutError:
-            logger.warning("Diagram extraction timed out after 120s — continuing without diagrams")
+            logger.warning("Diagram extraction timed out — continuing without diagrams")
             return {}
         except Exception as e:
-            logger.warning("Diagram extraction failed entirely: %s — continuing without diagrams", e)
+            logger.warning("Diagram extraction failed: %s — continuing without diagrams", e)
             return {}
 
     @staticmethod
     def _serialise_recipe(recipe: DiagramRecipe | None) -> str:
-        """Serialise DiagramRecipe to JSON string, or return '' on failure/None."""
         if recipe is None:
             return ""
         try:
@@ -397,90 +368,100 @@ class IngestionPipeline:
             return ""
 
     # ------------------------------------------------------------------
-    # Storage
+    # Storage (Qdrant)
     # ------------------------------------------------------------------
 
-    async def store(self, chunks: list[ChunkWithEmbedding], concepts: list[ConceptNode], diagram_recipes: dict[int, DiagramRecipe] | None = None) -> None:
-        """Write chunks to ChromaDB and concepts to KnowledgeGraph."""
+    async def store(
+        self,
+        chunks: list[ChunkWithEmbedding],
+        concepts: list[ConceptNode],
+        diagram_recipes: dict[int, DiagramRecipe] | None = None,
+    ) -> None:
+        """Write chunks to Qdrant. Each chunk becomes one point with full payload."""
         if not chunks:
             return
+
+        ids = [c.chunk.chunk_id for c in chunks]
+        vectors = [c.embedding for c in chunks]
+        payloads = [
+            {
+                "chunk_id": c.chunk.chunk_id,
+                "doc_id": c.chunk.doc_id,
+                "doc_name": c.chunk.doc_name,
+                "text": c.chunk.text,
+                "page_number": c.chunk.page_number if c.chunk.page_number is not None else -1,
+                "section_title": c.chunk.section_title or "",
+                "char_offset_start": c.chunk.char_offset_start,
+                "char_offset_end": c.chunk.char_offset_end,
+                "chunk_index": c.chunk.chunk_index,
+                "diagram_recipe": self._serialise_recipe(
+                    diagram_recipes.get(c.chunk.page_number)
+                    if diagram_recipes and c.chunk.page_number is not None
+                    else None
+                ),
+            }
+            for c in chunks
+        ]
+
         try:
-            ids = [c.chunk.chunk_id for c in chunks]
-            documents = [c.chunk.text for c in chunks]
-            embeddings = [c.embedding for c in chunks]
-            metadatas = [
-                {
-                    "chunk_id": c.chunk.chunk_id,
-                    "doc_id": c.chunk.doc_id,
-                    "doc_name": c.chunk.doc_name,
-                    "page_number": c.chunk.page_number if c.chunk.page_number is not None else -1,
-                    "section_title": c.chunk.section_title or "",
-                    "char_offset_start": c.chunk.char_offset_start,
-                    "char_offset_end": c.chunk.char_offset_end,
-                    "chunk_index": c.chunk.chunk_index,
-                    "diagram_recipe": self._serialise_recipe(
-                        diagram_recipes.get(c.chunk.page_number) if diagram_recipes and c.chunk.page_number is not None else None
-                    ),
-                }
-                for c in chunks
-            ]
-            self._collection.add(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-            )
-            logger.info("Stored %d chunks in ChromaDB", len(chunks))
+            vs.upsert_chunks(self._client, self._collection, ids, vectors, payloads)
+            logger.info("Stored %d chunks in Qdrant collection %s", len(chunks), self._collection)
         except Exception as e:
-            # Clean up partial state
+            raise RuntimeError(f"Failed to store chunks in Qdrant: {e}") from e
+
+        # Also embed and store diagram images directly for multimodal retrieval
+        if diagram_recipes:
+            await self._store_diagram_embeddings(diagram_recipes, chunks[0].chunk.doc_id, chunks[0].chunk.doc_name)
+
+    async def _store_diagram_embeddings(
+        self,
+        diagram_recipes: dict[int, DiagramRecipe],
+        doc_id: str,
+        doc_name: str,
+    ) -> None:
+        """Embed diagram page images and store as separate points for visual retrieval."""
+        for page_num, recipe in diagram_recipes.items():
+            if not recipe.image_b64:
+                continue
+            embedding = await self.embed_image(recipe.image_b64)
+            if embedding is None:
+                continue
+            point_id = str(uuid4())
+            payload = {
+                "chunk_id": point_id,
+                "doc_id": doc_id,
+                "doc_name": doc_name,
+                "text": f"[Diagram on page {page_num}] {recipe.description}",
+                "page_number": page_num,
+                "section_title": "Diagram",
+                "char_offset_start": 0,
+                "char_offset_end": 0,
+                "chunk_index": -1,  # marks as diagram point
+                "diagram_recipe": self._serialise_recipe(recipe),
+                "is_diagram_embedding": True,
+            }
             try:
-                ids_to_remove = [c.chunk.chunk_id for c in chunks]
-                self._collection.delete(ids=ids_to_remove)
-            except Exception:
-                pass
-            raise RuntimeError(f"Failed to store document chunks: {e}") from e
+                vs.upsert_chunks(self._client, self._collection, [point_id], [embedding], [payload])
+                logger.debug("Stored diagram embedding for page %d", page_num)
+            except Exception as e:
+                logger.warning("Failed to store diagram embedding for page %d: %s", page_num, e)
 
     # ------------------------------------------------------------------
     # Deletion
     # ------------------------------------------------------------------
 
     def delete_document(self, doc_id: str) -> int:
-        """Remove all chunks for a document from ChromaDB. Returns chunk count removed."""
-        results = self._collection.get(where={"doc_id": doc_id})
-        ids = results.get("ids", [])
-        if ids:
-            self._collection.delete(ids=ids)
+        count = vs.delete_by_doc_id(self._client, self._collection, doc_id)
         self._kg.remove_document_concepts(doc_id)
-        self._doc_metadata.pop(doc_id, None)
-        logger.info("Deleted %d chunks for doc_id=%s", len(ids), doc_id)
-        return len(ids)
+        return count
 
     def list_documents(self) -> list[dict]:
-        """Return document metadata from ChromaDB."""
-        try:
-            results = self._collection.get(include=["metadatas"])
-            metadatas = results.get("metadatas") or []
-            # Group by doc_id
-            docs: dict[str, dict] = {}
-            for m in metadatas:
-                did = m.get("doc_id", "")
-                if did not in docs:
-                    docs[did] = {
-                        "doc_id": did,
-                        "name": m.get("doc_name", ""),
-                        "chunk_count": 0,
-                    }
-                docs[did]["chunk_count"] += 1
-            return list(docs.values())
-        except Exception as e:
-            logger.error("Failed to list documents: %s", e)
-            return []
+        return vs.list_docs_in_collection(self._client, self._collection)
 
     # ------------------------------------------------------------------
-    # Orchestration
+    # Supported formats
     # ------------------------------------------------------------------
 
-    # Supported formats and their parsers
     _SUPPORTED_FORMATS = frozenset({
         "pdf", "txt", "docx", "doc", "pptx", "rtf",
         "png", "jpg", "jpeg", "webp", "heif",
@@ -490,9 +471,7 @@ class IngestionPipeline:
     _DIAGRAM_FORMATS = frozenset({"pdf"}) | _IMAGE_FORMATS
 
     def _parse_by_format(self, file_path: str, ext: str) -> ParsedDocument:
-        """Dispatch to the correct parser based on file extension."""
         from . import parsers
-
         if ext == "pdf":
             return self.parse_pdf(file_path)
         elif ext == "txt":
@@ -522,19 +501,17 @@ class IngestionPipeline:
         else:
             raise ValueError(f"Unsupported format '{ext}'")
 
-    async def ingest_document_fast(self, file_path: str, doc_name: str) -> IngestionResult:
-        """Phase 1: parse → chunk → embed → extract concepts → store. No diagram extraction.
+    # ------------------------------------------------------------------
+    # Orchestration
+    # ------------------------------------------------------------------
 
-        Returns quickly so the upload endpoint can respond immediately.
-        Diagram extraction is handled separately via extract_and_attach_diagrams.
-        """
+    async def ingest_document_fast(self, file_path: str, doc_name: str) -> IngestionResult:
+        """Phase 1: parse → chunk → embed → store. Returns quickly."""
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
         if ext not in self._SUPPORTED_FORMATS:
-            supported = ", ".join(sorted(self._SUPPORTED_FORMATS))
-            raise ValueError(f"Unsupported format '{ext}'. Supported: {supported}")
+            raise ValueError(f"Unsupported format '{ext}'")
 
         parsed = self._parse_by_format(file_path, ext)
-
         if not parsed.pages:
             raise ValueError("Document contains no extractable text")
 
@@ -545,13 +522,7 @@ class IngestionPipeline:
         try:
             chunks_with_embeddings = await self.generate_embeddings(chunks)
         except RuntimeError as e:
-            return IngestionResult(
-                doc_id=parsed.doc_id,
-                chunk_count=0,
-                concept_count=0,
-                status="failed",
-                error_message=str(e),
-            )
+            return IngestionResult(doc_id=parsed.doc_id, chunk_count=0, concept_count=0, status="failed", error_message=str(e))
 
         concepts = await self.extract_concepts(chunks)
         await self.store(chunks_with_embeddings, concepts, diagram_recipes=None)
@@ -570,96 +541,34 @@ class IngestionPipeline:
         )
 
     async def extract_and_attach_diagrams(self, file_path: str, doc_id: str) -> None:
-        """Phase 2 (background): extract diagram recipes and update ChromaDB metadata.
-
-        Runs after ingest_document_fast completes. Updates existing chunk metadata
-        in-place with diagram_recipe JSON strings.
-        """
+        """Phase 2 (background): extract diagrams and update Qdrant payloads."""
         try:
             diagram_recipes = await self._extract_diagrams(file_path)
             if not diagram_recipes:
                 logger.info("No diagrams found for doc_id=%s", doc_id)
                 return
 
-            # Fetch all chunks for this doc from ChromaDB
-            results = self._collection.get(
-                where={"doc_id": doc_id},
-                include=["metadatas"],
-            )
-            ids = results.get("ids", [])
-            metadatas = results.get("metadatas", [])
-
-            if not ids:
-                logger.warning("No chunks found for doc_id=%s when attaching diagrams", doc_id)
+            # Fetch all points for this doc
+            points = vs.get_points_by_doc_id(self._client, self._collection, doc_id)
+            if not points:
+                logger.warning("No points found for doc_id=%s when attaching diagrams", doc_id)
                 return
 
-            # Update metadata with diagram recipes
-            updated_metadatas = []
-            for meta in metadatas:
-                page_num = meta.get("page_number", -1)
+            # Update diagram_recipe payload on matching page chunks
+            updates = []
+            for pt in points:
+                page_num = pt["payload"].get("page_number", -1)
                 recipe = diagram_recipes.get(page_num) if page_num != -1 else None
-                updated_meta = dict(meta)
-                updated_meta["diagram_recipe"] = self._serialise_recipe(recipe)
-                updated_metadatas.append(updated_meta)
+                if recipe:
+                    updates.append((pt["id"], {"diagram_recipe": self._serialise_recipe(recipe)}))
 
-            self._collection.update(ids=ids, metadatas=updated_metadatas)
-            logger.info(
-                "Attached %d diagram recipes to %d chunks for doc_id=%s",
-                len(diagram_recipes), len(ids), doc_id,
-            )
+            if updates:
+                vs.update_payloads(self._client, self._collection, updates)
+                logger.info("Attached %d diagram recipes for doc_id=%s", len(updates), doc_id)
+
+            # Also store diagram image embeddings
+            doc_name = points[0]["payload"].get("doc_name", "") if points else ""
+            await self._store_diagram_embeddings(diagram_recipes, doc_id, doc_name)
+
         except Exception as e:
             logger.error("Background diagram extraction failed for doc_id=%s: %s", doc_id, e)
-
-    async def ingest_document(self, file_path: str, doc_name: str) -> IngestionResult:
-        """Full pipeline: parse → chunk → embed → extract concepts → store."""
-        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-        if ext not in self._SUPPORTED_FORMATS:
-            supported = ", ".join(sorted(self._SUPPORTED_FORMATS))
-            raise ValueError(f"Unsupported format '{ext}'. Supported: {supported}")
-
-        parsed = self._parse_by_format(file_path, ext)
-
-        if not parsed.pages:
-            raise ValueError("Document contains no extractable text")
-
-        # Chunk
-        chunks = self.chunk_document(parsed)
-        if not chunks:
-            raise ValueError("Document produced no chunks after parsing")
-
-        # Embed
-        try:
-            chunks_with_embeddings = await self.generate_embeddings(chunks)
-        except RuntimeError as e:
-            return IngestionResult(
-                doc_id=parsed.doc_id,
-                chunk_count=0,
-                concept_count=0,
-                status="failed",
-                error_message=str(e),
-            )
-
-        # Extract diagrams (PDF and image formats only, non-fatal)
-        diagram_recipes: dict[int, DiagramRecipe] = {}
-        if ext in self._DIAGRAM_FORMATS:
-            diagram_recipes = await self._extract_diagrams(file_path)
-
-        # Extract concepts (non-fatal)
-        concepts = await self.extract_concepts(chunks)
-
-        # Store
-        await self.store(chunks_with_embeddings, concepts, diagram_recipes=diagram_recipes)
-
-        # Persist KG
-        try:
-            self._kg.save()
-        except Exception as e:
-            logger.warning("Failed to persist knowledge graph: %s", e)
-
-        return IngestionResult(
-            doc_id=parsed.doc_id,
-            chunk_count=len(chunks),
-            concept_count=len(concepts),
-            status="complete",
-            diagram_count=len(diagram_recipes),
-        )

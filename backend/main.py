@@ -13,14 +13,16 @@ from pydantic import BaseModel
 
 from rag.ingestion import IngestionPipeline
 from rag.knowledge_graph import KnowledgeGraph
+from learner_memory import load_profile, save_profile, apply_update
 
 _UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "data", "uploads")
 os.makedirs(_UPLOADS_DIR, exist_ok=True)
 
 # Shared RAG instances (initialised once at startup)
+# user_id=None → uses tablo_shared collection (single-user / open-source mode)
 _kg = KnowledgeGraph()
 _kg.load()
-_ingestion = IngestionPipeline(knowledge_graph=_kg)
+_ingestion = IngestionPipeline(knowledge_graph=_kg, user_id=None)
 
 
 app = FastAPI(
@@ -324,29 +326,20 @@ def delete_document(doc_id: str) -> dict[str, str]:
 
 @app.post("/documents/{doc_id}/extract-diagrams")
 async def extract_diagrams(doc_id: str, background_tasks: BackgroundTasks) -> dict[str, str]:
-    """Trigger diagram extraction for an already-ingested document.
-
-    Useful when a document was uploaded before diagram extraction was available.
-    Runs in the background — returns immediately.
-    """
-    # Find the uploaded file for this doc_id
-    results = _ingestion._collection.get(where={"doc_id": doc_id}, include=["metadatas"], limit=1)
-    if not results.get("ids"):
+    """Trigger diagram extraction for an already-ingested document."""
+    from rag.vector_store import get_points_by_doc_id
+    points = get_points_by_doc_id(_ingestion._client, _ingestion._collection, doc_id)
+    if not points:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
-    doc_name = results["metadatas"][0].get("doc_name", "")
-    # Find the file on disk
+    doc_name = points[0]["payload"].get("doc_name", "")
     upload_files = os.listdir(_UPLOADS_DIR)
     matching = [f for f in upload_files if doc_name in f]
     if not matching:
         raise HTTPException(status_code=404, detail=f"Upload file for '{doc_name}' not found on disk")
 
     file_path = os.path.join(_UPLOADS_DIR, matching[0])
-    background_tasks.add_task(
-        _ingestion.extract_and_attach_diagrams,
-        file_path=file_path,
-        doc_id=doc_id,
-    )
+    background_tasks.add_task(_ingestion.extract_and_attach_diagrams, file_path=file_path, doc_id=doc_id)
     return {"status": "extraction_started", "doc_id": doc_id, "file": matching[0]}
 
 
@@ -373,19 +366,19 @@ _MIME_TYPES = {
 
 
 def _find_upload_file(doc_id: str) -> tuple[str, str]:
-    """Find the uploaded file path for a doc_id. Returns (file_path, doc_name). Raises HTTPException on failure."""
-    results = _ingestion._collection.get(where={"doc_id": doc_id}, include=["metadatas"], limit=1)
-    if not results.get("ids"):
+    """Find the uploaded file path for a doc_id. Returns (file_path, doc_name)."""
+    from rag.vector_store import get_points_by_doc_id
+    points = get_points_by_doc_id(_ingestion._client, _ingestion._collection, doc_id)
+    if not points:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
-    doc_name = results["metadatas"][0].get("doc_name", "")
+    doc_name = points[0]["payload"].get("doc_name", "")
     upload_files = os.listdir(_UPLOADS_DIR)
     matching = [f for f in upload_files if doc_name in f]
     if not matching:
         raise HTTPException(status_code=404, detail=f"Upload file for '{doc_name}' not found on disk")
 
     file_path = os.path.join(_UPLOADS_DIR, matching[0])
-    # Path traversal prevention
     real_path = os.path.realpath(file_path)
     real_uploads = os.path.realpath(_UPLOADS_DIR)
     if not real_path.startswith(real_uploads):
@@ -406,15 +399,70 @@ def get_document_file(doc_id: str):
 @app.get("/documents/{doc_id}/text")
 def get_document_text(doc_id: str) -> dict:
     """Return extracted plain text for formats that need server-side text extraction."""
-    results = _ingestion._collection.get(where={"doc_id": doc_id}, include=["documents", "metadatas"])
-    if not results.get("ids"):
+    from rag.vector_store import get_points_by_doc_id
+    points = get_points_by_doc_id(_ingestion._client, _ingestion._collection, doc_id)
+    if not points:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
-    # Combine all chunk texts in order
-    chunks = list(zip(results["metadatas"], results["documents"]))
-    chunks.sort(key=lambda x: x[0].get("chunk_index", 0))
-    full_text = "\n\n".join(doc for _, doc in chunks)
-    doc_name = chunks[0][0].get("doc_name", "") if chunks else ""
+    # Sort by chunk_index and join
+    payloads = [pt["payload"] for pt in points]
+    payloads.sort(key=lambda p: p.get("chunk_index", 0))
+    full_text = "\n\n".join(p.get("text", "") for p in payloads)
+    doc_name = payloads[0].get("doc_name", "") if payloads else ""
     ext = os.path.splitext(doc_name)[1].lower().lstrip(".")
 
     return {"doc_id": doc_id, "doc_name": doc_name, "format": ext, "text": full_text}
+
+
+# ---------------------------------------------------------------------------
+# Learner profile endpoints
+# ---------------------------------------------------------------------------
+
+class LearnerProfileResponse(BaseModel):
+    learner_id: str
+    learning_styles: dict
+    struggle_areas: list
+    mastered: list
+    hints_that_worked: dict
+    preferred_pace: str
+    last_session_summary: str
+    session_history: list
+    created_at: str
+    updated_at: str
+
+
+@app.get("/learner/{learner_id}/profile", response_model=LearnerProfileResponse)
+def get_learner_profile(learner_id: str) -> LearnerProfileResponse:
+    """Get the persistent learner profile for a given learner ID."""
+    profile = load_profile(learner_id)
+    return LearnerProfileResponse(
+        learner_id=profile.get("learner_id", learner_id),
+        learning_styles=profile.get("learning_styles", {}),
+        struggle_areas=profile.get("struggle_areas", []),
+        mastered=profile.get("mastered", []),
+        hints_that_worked=profile.get("hints_that_worked", {}),
+        preferred_pace=profile.get("preferred_pace", "normal"),
+        last_session_summary=profile.get("last_session_summary", ""),
+        session_history=profile.get("session_history", []),
+        created_at=profile.get("created_at", ""),
+        updated_at=profile.get("updated_at", ""),
+    )
+
+
+@app.patch("/learner/{learner_id}/profile")
+def patch_learner_profile(learner_id: str, update: dict) -> dict:
+    """Manually update a learner profile (for testing or admin use)."""
+    profile = load_profile(learner_id)
+    profile = apply_update(profile, update)
+    save_profile(profile)
+    return {"status": "updated", "learner_id": learner_id}
+
+
+@app.delete("/learner/{learner_id}/profile")
+def reset_learner_profile(learner_id: str) -> dict:
+    """Reset a learner profile to defaults."""
+    from learner_memory import _profile_path
+    path = _profile_path(learner_id)
+    if os.path.exists(path):
+        os.remove(path)
+    return {"status": "reset", "learner_id": learner_id}

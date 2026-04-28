@@ -1,0 +1,101 @@
+version: "3.9"
+
+# ─── Tablo self-hosted stack ──────────────────────────────────────────────────
+#
+# Default mode (LiveKit Cloud):
+#   docker compose up qdrant -d
+#   Set LIVEKIT_URL=wss://your-project.livekit.cloud in backend/.env
+#
+# Self-hosted mode (open-source LiveKit):
+#   docker compose --profile livekit up -d
+#   Set LIVEKIT_URL=ws://localhost:7880 in backend/.env
+#   (or wss://your-domain:7880 with TLS in production)
+#
+# Both modes use the same backend, agent, and Qdrant — only LIVEKIT_URL differs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Qdrant vector store ────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: tablo-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── LiveKit server (self-hosted, open-source) ──────────────────────────────
+  # Only starts when you run: docker compose --profile livekit up
+  # Uses livekit.yaml for config (API key/secret must match backend/.env)
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: tablo-livekit
+    command: --config /etc/livekit/livekit.yaml
+    ports:
+      - "7880:7880"   # HTTP/WebSocket signaling
+      - "7881:7881"   # TURN/TLS (optional)
+      - "50100-50200:50100-50200/udp"  # WebRTC media UDP range
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    restart: unless-stopped
+    profiles:
+      - livekit  # only starts with: docker compose --profile livekit up
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tablo-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - ./backend/data/uploads:/app/data/uploads
+      - ./backend/data/learner_profiles:/app/data/learner_profiles
+      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Agent worker ───────────────────────────────────────────────────────────
+  # Run with: docker compose --profile agent up agent
+  agent:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tablo-agent
+    command: python agent.py dev
+    env_file:
+      - ./backend/.env
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - ./backend/data/uploads:/app/data/uploads
+      - ./backend/data/learner_profiles:/app/data/learner_profiles
+      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles:
+      - agent
+
+volumes:
+  qdrant_data:

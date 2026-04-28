@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Tldraw, type Editor, type TLShapeId, b64Vecs, createShapeId } from "tldraw";
 import { svgShapeUtils } from "./SvgShape";
 import { toRichText } from "@tldraw/tlschema";
 import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar, useRoomContext } from "@livekit/components-react";
-import { LocalVideoTrack, Track } from "livekit-client";
 import { create as createMathScope, evaluate as mathEvaluate } from "mathjs";
 import "@livekit/components-styles";
 import { SourcePanel, type SourceAttribution, type SourcesPayload } from "./source-panel";
@@ -4423,7 +4422,20 @@ function mapPagePointToVideo(
   };
 }
 
-function CanvasVideoPublisher({
+/**
+ * BoardSnapshotPublisher — replaces the continuous video track.
+ *
+ * Sends a PNG snapshot of the board via LiveKit data message (topic: board.snapshot)
+ * under three conditions:
+ *   1. Local participant starts speaking — always send immediately (AI needs current board)
+ *   2. Board changes while AI is NOT speaking — debounce 1.5s (wait for stroke to finish)
+ *   3. Board changes while AI IS speaking — send immediately (AI mid-sentence needs update)
+ *
+ * The agent receives these snapshots and forwards them to Gemini Live as inline images.
+ * This replaces the continuous video stream, eliminating the 2-minute session limit
+ * while preserving full visual awareness of the board.
+ */
+function BoardSnapshotPublisher({
   isConnected,
   editor,
 }: {
@@ -4431,170 +4443,114 @@ function CanvasVideoPublisher({
   editor: Editor | null;
 }) {
   const room = useRoomContext();
-  const timerRef = useRef<number | null>(null);
-  const localVideoTrackRef = useRef<LocalVideoTrack | null>(null);
+  const debounceRef = useRef<number | null>(null);
+  const lastSnapshotHashRef = useRef<string>("");
+  const aiSpeakingRef = useRef<boolean>(false);
+
+  const captureAndSend = useCallback(async () => {
+    if (!editor || !isConnected) return;
+    try {
+      const pageShapeIds = [...editor.getCurrentPageShapeIds()];
+      // Skip if board is empty
+      if (pageShapeIds.length === 0) return;
+
+      const imageResult = await editor.toImage(pageShapeIds, {
+        format: "png",
+        background: true,
+        padding: 32,
+        scale: 0.75, // 75% scale — enough for Gemini to read, smaller token cost
+      });
+
+      const arrayBuffer = await imageResult.blob.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+
+      // Simple hash to avoid sending identical snapshots
+      const hash = bytes.length.toString() + bytes[0] + bytes[bytes.length - 1];
+      if (hash === lastSnapshotHashRef.current) return;
+      lastSnapshotHashRef.current = hash;
+
+      // Encode as base64 and wrap in a JSON envelope
+      let binary = "";
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = btoa(binary);
+
+      const payload = JSON.stringify({ type: "board.snapshot", image_b64: b64, mime: "image/png" });
+      await room.localParticipant.publishData(
+        new TextEncoder().encode(payload),
+        { reliable: true, topic: "board.snapshot" }
+      );
+    } catch (e) {
+      console.warn("[BoardSnapshotPublisher] Failed to capture/send snapshot:", e);
+    }
+  }, [editor, isConnected, room]);
 
   useEffect(() => {
     if (!isConnected || !editor) return;
 
-    let cancelled = false;
+    // Track AI speaking state via remote participant events
+    const onParticipantSpeakingChanged = (speaking: boolean) => {
+      aiSpeakingRef.current = speaking;
+    };
 
-    const offscreenCanvas = document.createElement("canvas");
-    offscreenCanvas.width = 1280;
-    offscreenCanvas.height = 720;
-    const drawCtx = offscreenCanvas.getContext("2d");
+    // Listen to all remote participants for speaking changes
+    room.on("participantSpeakingChanged" as any, (_participant: any, speaking: boolean) => {
+      // Only track the agent participant (not local)
+      if (_participant.identity !== room.localParticipant.identity) {
+        onParticipantSpeakingChanged(speaking);
+      }
+    });
 
-    if (!drawCtx) {
-      console.error("Unable to create offscreen canvas context for board video");
-      return;
-    }
+    // Trigger 1: local participant starts speaking → send immediately
+    const onLocalSpeakingChanged = () => {
+      if (room.localParticipant.isSpeaking) {
+        if (debounceRef.current) {
+          window.clearTimeout(debounceRef.current);
+          debounceRef.current = null;
+        }
+        void captureAndSend();
+      }
+    };
+    room.localParticipant.on("isSpeakingChanged", onLocalSpeakingChanged);
 
-    drawCtx.fillStyle = "#0b1220";
-    drawCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-
-    const stream = offscreenCanvas.captureStream(2);
-    const mediaTrack = stream.getVideoTracks()[0];
-
-    if (!mediaTrack) {
-      console.error("No media track produced from board capture stream");
-      return;
-    }
-
-    const localVideoTrack = new LocalVideoTrack(mediaTrack);
-    localVideoTrackRef.current = localVideoTrack;
-
-    void room.localParticipant
-      .publishTrack(localVideoTrack, {
-        source: Track.Source.Camera,
-        simulcast: false,
-      })
-      .then(() => {
-        console.log("Published live board video track");
-      })
-      .catch((error) => {
-        console.error("Failed to publish board video track", error);
-      });
-
-    const renderBoardFrame = async () => {
-      try {
-        const pageShapeIds = [...editor.getCurrentPageShapeIds()];
-        const exportPadding = 64;
-        const imageResult = await editor.toImage(pageShapeIds, {
-          format: "png",
-          background: true,
-          preserveAspectRatio: "contain",
-          padding: exportPadding,
-          scale: 1,
-        });
-
-        if (cancelled) return;
-
-        const bitmap = await createImageBitmap(imageResult.blob);
-        drawCtx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-        drawCtx.fillStyle = "#0b1220";
-        drawCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-
-        const scale = Math.min(
-          offscreenCanvas.width / bitmap.width,
-          offscreenCanvas.height / bitmap.height
-        );
-        const targetW = bitmap.width * scale;
-        const targetH = bitmap.height * scale;
-        const targetX = (offscreenCanvas.width - targetW) / 2;
-        const targetY = (offscreenCanvas.height - targetH) / 2;
-
-        drawCtx.drawImage(bitmap, targetX, targetY, targetW, targetH);
-
-        const pageBounds = editor.getCurrentPageBounds();
-        if (pageBounds) {
-          const normalizedBounds: PageRect = {
-            x: pageBounds.x,
-            y: pageBounds.y,
-            w: pageBounds.w,
-            h: pageBounds.h,
-          };
-
-          const targetRect = { x: targetX, y: targetY, w: targetW, h: targetH };
-
-          const selection = editor.getSelectionPageBounds();
-          if (selection) {
-            const topLeft = mapPagePointToVideo(
-              { x: selection.x, y: selection.y },
-              normalizedBounds,
-              exportPadding,
-              targetRect
-            );
-            const bottomRight = mapPagePointToVideo(
-              { x: selection.x + selection.w, y: selection.y + selection.h },
-              normalizedBounds,
-              exportPadding,
-              targetRect
-            );
-
-            drawCtx.save();
-            drawCtx.strokeStyle = "#22d3ee";
-            drawCtx.lineWidth = 3;
-            drawCtx.setLineDash([10, 6]);
-            drawCtx.strokeRect(
-              topLeft.x,
-              topLeft.y,
-              Math.max(1, bottomRight.x - topLeft.x),
-              Math.max(1, bottomRight.y - topLeft.y)
-            );
-            drawCtx.restore();
-          }
-
-          const pointer = editor.inputs.getCurrentPagePoint();
-          const pointerVideo = mapPagePointToVideo(
-            { x: pointer.x, y: pointer.y },
-            normalizedBounds,
-            exportPadding,
-            targetRect
-          );
-
-          drawCtx.save();
-          drawCtx.fillStyle = "#f97316";
-          drawCtx.beginPath();
-          drawCtx.arc(pointerVideo.x, pointerVideo.y, 7, 0, Math.PI * 2);
-          drawCtx.fill();
-          drawCtx.strokeStyle = "#fff";
-          drawCtx.lineWidth = 2;
-          drawCtx.stroke();
-          drawCtx.restore();
+    // Trigger 2 & 3: board changes
+    const removeStoreListener = editor.store.listen(
+      () => {
+        if (debounceRef.current) {
+          window.clearTimeout(debounceRef.current);
+          debounceRef.current = null;
         }
 
-        bitmap.close();
-      } catch (error) {
-        console.error("Failed to render board video frame", error);
-      }
-    };
+        if (aiSpeakingRef.current) {
+          // AI is speaking — send immediately so it can react mid-sentence
+          void captureAndSend();
+        } else {
+          // AI is silent — debounce to wait for stroke completion
+          debounceRef.current = window.setTimeout(() => {
+            void captureAndSend();
+            debounceRef.current = null;
+          }, 1500);
+        }
+      },
+      { source: "user", scope: "document" } // only user-initiated changes
+    );
 
-    void renderBoardFrame();
-    timerRef.current = window.setInterval(() => {
-      void renderBoardFrame();
-    }, 200);
+    // Send initial snapshot when connected
+    void captureAndSend();
 
     return () => {
-      cancelled = true;
-
-      if (timerRef.current) {
-        window.clearInterval(timerRef.current);
-        timerRef.current = null;
+      if (debounceRef.current) {
+        window.clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
-
-      const localTrack = localVideoTrackRef.current;
-      localVideoTrackRef.current = null;
-
-      if (localTrack) {
-        void room.localParticipant.unpublishTrack(localTrack);
-        localTrack.stop();
-      }
-
-      stream.getTracks().forEach((track) => track.stop());
+      room.localParticipant.off("isSpeakingChanged", onLocalSpeakingChanged);
+      room.off("participantSpeakingChanged" as any, onParticipantSpeakingChanged);
+      removeStoreListener();
     };
-  }, [editor, isConnected, room]);
+  }, [editor, isConnected, room, captureAndSend]);
 
-  return null; // This component has no UI
+  return null;
 }
 
 function BoardCommandBridge({
@@ -4906,15 +4862,20 @@ export function TabloWorkspace() {
       serverUrl={roomDetails?.serverUrl}
       token={roomDetails?.token}
       connect={!!roomDetails}
-      audio={true}
+      audio={{
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }}
+      video={false}
       onConnected={() => setRoomState("connected")}
       onDisconnected={() => {
         setRoomState("idle");
         setRoomDetails(null);
       }}
     >
-      <RoomAudioRenderer />
-      <CanvasVideoPublisher isConnected={roomState === "connected"} editor={editor} />
+      <RoomAudioRenderer muted={false} />
+      <BoardSnapshotPublisher isConnected={roomState === "connected"} editor={editor} />
       <BoardCommandBridge
         isConnected={roomState === "connected"}
         editor={editor}
@@ -4955,127 +4916,6 @@ export function TabloWorkspace() {
             />
           </div>
 
-          <aside className="hidden w-[380px] shrink-0 border-l border-white/10 bg-slate-950/62 p-4 backdrop-blur xl:flex xl:flex-col">
-            <div className="rounded-[24px] border border-white/10 bg-white/5 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-cyan-200/70">
-                Realtime status
-              </p>
-              <p className="mt-3 text-sm leading-6 text-slate-300">
-                This shell is now aligned with the actual product direction:
-                LiveKit for room transport, backend-issued tokens, and live
-                vision input before Gemini Live.
-              </p>
-            </div>
-
-            <div className="mt-4 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                Session readiness
-              </p>
-
-              {status === "error" ? (
-                <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-400/10 p-4 text-sm leading-6 text-rose-100">
-                  {errorMessage}
-                </div>
-              ) : null}
-
-              {session ? (
-                <div className="mt-4 space-y-4 text-sm leading-6 text-slate-200">
-                  <div>
-                    <p className="font-medium text-white">Session ID</p>
-                    <p className="mt-1">{session.session_id}</p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Backend status</p>
-                    <p className="mt-1">{session.backend_status}</p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Vision feed</p>
-                    <p className="mt-1">
-                      The board is streamed as a live video track into the room
-                      so Gemini receives ongoing visual context.
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Live board metrics</p>
-                    <p className="mt-1">{boardMetrics.summary}</p>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="mt-4 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                LiveKit setup
-              </p>
-              {realtimeConfig ? (
-                <div className="mt-4 space-y-4 text-sm leading-6 text-slate-200">
-                  <div>
-                    <p className="font-medium text-white">Configured</p>
-                    <p className="mt-1">
-                      {realtimeConfig.configured
-                        ? `Yes${realtimeConfig.livekit_url ? `, ${realtimeConfig.livekit_url}` : ""}`
-                        : "No. Add backend LiveKit credentials to enable room connection."}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Audio pipeline</p>
-                    <p className="mt-1">
-                      LiveKit transport: {realtimeConfig.livekit_audio_hz} Hz
-                      → Gemini input: {realtimeConfig.gemini_input_hz} Hz →
-                      Gemini output: {realtimeConfig.gemini_output_hz} Hz →
-                      back to LiveKit.
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Conversion boundary</p>
-                    <p className="mt-1">
-                      {realtimeConfig.backend_conversion_boundary}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-medium text-white">Notes</p>
-                    <ul className="mt-2 list-disc space-y-2 pl-5 text-slate-300">
-                      {realtimeConfig.notes.map((note) => (
-                        <li key={note}>{note}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="mt-4 flex-1 rounded-[24px] border border-white/10 bg-slate-900/75 p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">
-                Room connection
-              </p>
-              <div className="mt-4 space-y-4 text-sm leading-6 text-slate-200">
-                <div>
-                  <p className="font-medium text-white">State</p>
-                  <p className="mt-1">
-                    {roomState === "connected"
-                      ? "Connected to LiveKit room."
-                      : roomState === "connecting"
-                        ? "Connecting to LiveKit..."
-                        : roomState === "error"
-                          ? "LiveKit connection failed."
-                          : "Not connected yet."}
-                  </p>
-                </div>
-                {roomDetails ? (
-                  <>
-                    <div>
-                      <p className="font-medium text-white">Room</p>
-                      <p className="mt-1">{roomDetails.roomName}</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-white">Participant</p>
-                      <p className="mt-1">{roomDetails.participantIdentity}</p>
-                    </div>
-                  </>
-                ) : null}
-              </div>
-            </div>
-          </aside>
         </section>
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 md:px-6 md:pb-6">

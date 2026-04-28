@@ -1,10 +1,14 @@
 # Local Env Files
 .env
 
+# LiveKit self-hosted config (contains credentials)
+livekit.yaml
+
 # Backend runtime data (uploads, vector store, knowledge graph)
 backend/data/uploads/
 backend/data/chromadb/
 backend/data/knowledge_graph.json
+backend/data/learner_profiles/
 .env.local
 .env.development.local
 .env.test.local

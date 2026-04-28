@@ -7,7 +7,7 @@ python-dotenv
 livekit-api
 livekit-agents[images]
 livekit-plugins-google
-chromadb
+qdrant-client
 pymupdf
 hypothesis
 python-multipart

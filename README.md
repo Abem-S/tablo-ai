@@ -594,14 +594,41 @@ This should read as an execution plan for the architecture above, not just as a 
 
 What shipped:
 
-- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (use the dated preview, not `latest` — the `latest` alias rejects function calls with 1008 errors), starts an `AgentSession` with `await session.start(agent=TabloAgent(...), room=ctx.room, room_options=room_io.RoomOptions(video_input=True))`, and greets the learner via `await session.generate_reply()`.
-- **`backend/main.py`** — `/livekit/token` endpoint issues a signed participant JWT and dispatches the `tablo-assistant` agent to the room on demand via `livekit_api.agent_dispatch.create_dispatch`.
-- **Frontend** — `LiveKitRoom` from `@livekit/components-react` connects using the backend-issued token. `RoomAudioRenderer` plays AI voice audio. `VoiceAssistantControlBar` appears in the bottom bar when connected.
-- **Live board vision feed** — the frontend exports the `tldraw` page into PNG frames and publishes an offscreen-canvas video track into the LiveKit room, giving Gemini ongoing visual context.
-- **Key env vars:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`. The plugin reads `GOOGLE_API_KEY` specifically — `GEMINI_API_KEY` is aliased automatically in `agent.py` if only that is set.
-- **Model note:** `gemini-live-2.5-flash-native-audio` is the Vertex AI model name. Use `gemini-2.5-flash-native-audio-latest` (or the dated preview variant) for a standard Gemini API key.
+- **`backend/agent.py`** — `livekit-agents` v1.5.x worker registered as `tablo-assistant`. Connects to the dispatched room, instantiates `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"` (use the dated preview, not `latest`), starts an `AgentSession`, and greets the learner via `await session.generate_reply()`.
+- **`backend/main.py`** — `/livekit/token` issues a signed participant JWT and dispatches `tablo-assistant` to the room via `livekit_api.agent_dispatch.create_dispatch`.
+- **Frontend** — `LiveKitRoom` connects using the backend-issued token. `RoomAudioRenderer` plays AI voice audio. `VoiceAssistantControlBar` appears when connected. Mic uses `echoCancellation`, `noiseSuppression`, `autoGainControl`.
+- **Key env vars:** `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`. `GEMINI_API_KEY` is aliased automatically in `agent.py`.
 
-**End of Day 2 result:** a learner can open the board, click Connect, and have a real-time voice conversation with a Gemini-powered Socratic tutor, while the model sees a live board vision feed and can draw on the board.
+### Board Vision — Triggered Snapshots ✅ Shipped
+
+The continuous video track has been replaced with `BoardSnapshotPublisher` — eliminating the 2-minute session limit while preserving full visual awareness.
+
+- Frontend sends PNG snapshots via `board.snapshot` data topic on three triggers: user starts speaking, board changes while AI is silent (1.5s debounce), board changes while AI is speaking (immediate).
+- Agent stores the latest snapshot as `_latest_board_snapshot`.
+- `get_board_image` tool lets the agent see the board on demand — reads freehand writing, student drawings, handwritten equations.
+- Sessions now run indefinitely. `video_input=False` on `RoomOptions`.
+
+### Skills System ✅ Shipped
+
+Agent behavior is defined in modular markdown files in `backend/skills/`, not hardcoded in `agent.py`:
+
+- `core_teaching.md`, `drawing_commands.md`, `document_grounding.md`, `learner_adaptation.md`
+- `backend/skills_loader.py` assembles the dynamic system prompt = skills + learner profile at session start
+- Edit a skill file and restart the worker — no code changes needed
+
+### Learner Memory ✅ Shipped
+
+- Per-learner JSON profiles in `backend/data/learner_profiles/`
+- `update_learner_profile` tool — agent writes observations mid-session (learning styles, struggle areas, mastered topics, hints that worked)
+- Profile loaded at session start, injected into system prompt
+- Persists across sessions
+- API: `GET/PATCH/DELETE /learner/{id}/profile`
+
+### LiveKit Self-Hosted Support ✅ Shipped
+
+- `docker compose --profile livekit up -d` starts an open-source LiveKit server
+- `livekit.yaml.example` template provided
+- Switch between Cloud and self-hosted via `LIVEKIT_URL` env var only — zero code changes
 
 ### AI Drawing Capabilities ✅ Shipped
 
@@ -630,27 +657,26 @@ The frontend also includes a command validation layer that rejects malformed com
 
 A full hybrid RAG pipeline is implemented in `backend/rag/`:
 
-- **Hybrid retrieval:** vector search (ChromaDB + `gemini-embedding-2`, 3072-dim multimodal embeddings) + knowledge graph traversal, fused with Reciprocal Rank Fusion. Cosine similarity threshold applied before RRF.
-- **Two-phase ingestion:** `POST /documents/upload` returns immediately after text chunking and embedding. Diagram extraction runs as a background task — PDF pages rendered to PNG via PyMuPDF, sent to Gemini 2.5 Flash vision to extract diagram descriptions and store page images as base64.
-- **On-demand diagram drawing:** `draw_diagram(page_number)` tool fetches the stored page image and generates accurate tldraw commands from the actual visual — not from a text description.
+- **Vector store:** Qdrant (self-hosted Docker or Qdrant Cloud). `tablo_shared` collection for single-user/open-source mode. Per-user collections (`tablo_{user_id}`) when auth is added. `backend/rag/vector_store.py` is a thin Qdrant wrapper.
+- **Hybrid retrieval:** vector search (Qdrant + `gemini-embedding-2`, 3072-dim multimodal embeddings) + knowledge graph traversal, fused with Reciprocal Rank Fusion.
+- **Two-phase ingestion:** `POST /documents/upload` returns immediately after text chunking and embedding. Diagram extraction runs as a background task — PDF pages rendered to PNG via PyMuPDF, sent to Gemini 2.5 Flash vision to extract diagram descriptions and store page images as base64. Diagram images also embedded directly via `gemini-embedding-2` multimodal for visual retrieval.
+- **On-demand diagram drawing:** `draw_diagram(page_number)` tool fetches the stored page image and generates accurate tldraw commands from the actual visual.
 - **Context compression:** `search_documents` result compressed to ≤500 chars via gemini-2.5-flash before returning to Gemini Live, preventing 1008/1011 WebSocket disconnects.
 - **Source transparency:** retrieved sources published to frontend via `tutor.sources` LiveKit data topic; `SourcePanel` component shows document name, page, section, and relevance.
-- **Context window compression:** `ContextWindowCompressionConfig` with sliding window enabled on the RealtimeModel to prevent session context overflow in long sessions.
+- **RAG injection:** context flows through the `search_documents` tool only. The warm-path `update_instructions` injection has been removed — it was getting compressed away by the sliding window.
+- **Context window compression:** `ContextWindowCompressionConfig` with sliding window enabled on the RealtimeModel.
 
-### Multi-Format Document Viewer Panel 🚧 In Progress
+### Multi-Format Document Viewer Panel ✅ Shipped
 
 A document viewer panel alongside the whiteboard, supporting 17 file formats with AI-triggered source navigation.
 
-**Backend (complete):**
-- `backend/rag/parsers.py` — per-format text extraction for docx (python-docx), pptx (python-pptx), rtf (striprtf), images (Gemini vision), xlsx/xls (openpyxl/xlrd), csv/tsv, html (BeautifulSoup), doc/hwp (fallback to Gemini vision).
+- `backend/rag/parsers.py` — per-format text extraction for docx, pptx, rtf, images (Gemini vision), xlsx/xls, csv/tsv, html, doc/hwp.
 - File serving: `GET /documents/{doc_id}/file` (raw bytes) and `GET /documents/{doc_id}/text` (extracted text as JSON).
-- `tutor.sources` payload extended with `navigate_to` field for AI-triggered page navigation.
+- `tutor.sources` payload includes `navigate_to` field for AI-triggered page navigation.
 - `learner.context` LiveKit data topic for learner-to-agent context sharing.
-
-**Frontend (partially complete):**
-- `DocumentViewerPanel` component with document list, basic PDF/image/text viewing.
-- Upload component accepts all 17 formats.
-- **Remaining:** replace iframe PDF viewer with `react-pdf` for page-by-page rendering, add page navigation, wire AI-triggered page jumping and text highlighting.
+- `react-pdf` renders actual PDF pages with prev/next navigation and text layer highlighting.
+- AI auto-opens panel, jumps to correct page, highlights referenced excerpt.
+- Select text in viewer → "Ask AI about this" floating tooltip → sends via `learner.context` → agent prepends to next `search_documents` query.
 
 ### Week 2: Socratic Interaction and Live Tutor Layer
 

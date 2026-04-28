@@ -61,11 +61,8 @@ class RAGOrchestrator:
         # Retrieve
         result = await self._retrieval.retrieve(query=query, turn_id=turn_id)
 
-        # Inject context and publish sources concurrently
-        await asyncio.gather(
-            self.inject_context(result.context, turn_id),
-            self.publish_sources(result.context.sources, turn_id, result.context.is_general_knowledge),
-        )
+        # Publish sources to frontend (context injection removed — tool path handles RAG)
+        await self.publish_sources(result.context.sources, turn_id, result.context.is_general_knowledge)
 
     # ------------------------------------------------------------------
     # Query rewriting
@@ -143,6 +140,15 @@ class RAGOrchestrator:
     ) -> None:
         """Publish source attribution to frontend via tutor.sources LiveKit data topic."""
         try:
+            navigate_to = None
+            if sources and not is_general_knowledge:
+                top = sources[0]
+                navigate_to = {
+                    "doc_name": top.document_name,
+                    "page_number": top.page_number,
+                    "text_excerpt": top.text_excerpt[:200] if top.text_excerpt else None,
+                }
+
             payload = {
                 "turn_id": turn_id,
                 "is_general_knowledge": is_general_knowledge,
@@ -158,11 +164,7 @@ class RAGOrchestrator:
                     }
                     for s in sources
                 ],
-                "navigate_to": {
-                    "doc_name": sources[0].document_name,
-                    "page_number": sources[0].page_number,
-                    "text_excerpt": sources[0].text_excerpt,
-                } if sources and not is_general_knowledge else None,
+                "navigate_to": navigate_to,
             }
             data = json.dumps(payload).encode("utf-8")
             await self._room.local_participant.publish_data(
@@ -170,9 +172,10 @@ class RAGOrchestrator:
                 reliable=True,
                 topic="tutor.sources",
             )
-            logger.debug("Published %d sources for turn %s", len(sources), turn_id)
+            logger.info("Published %d sources, navigate_to=%s", len(sources),
+                        f"p.{navigate_to['page_number']}" if navigate_to else "none")
         except Exception as e:
-            logger.warning("Failed to publish sources for turn %s: %s", turn_id, e)
+            logger.warning("Failed to publish sources for turn %s: %s", turn_id, e, exc_info=True)
 
     # ------------------------------------------------------------------
     # Session management
