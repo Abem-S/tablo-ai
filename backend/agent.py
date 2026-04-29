@@ -81,19 +81,16 @@ class TabloAgent(Agent):
                 pass
 
     async def _handle_board_snapshot(self, data: bytes) -> None:
-        """Receive a board.snapshot and store it for use in the next agent turn.
+        """Receive a board.snapshot and store it for use when the agent calls get_board_image.
 
-        Rather than injecting into chat history (which can confuse the model and
-        cause it to respond unexpectedly), we store the latest snapshot and include
-        it via update_instructions so Gemini has visual context without being triggered.
+        Does NOT inject into chat context automatically — that caused 1008 disconnects.
+        The agent calls get_board_image explicitly when it needs to see the board.
         """
         try:
             payload = json.loads(data.decode("utf-8"))
             image_b64 = payload.get("image_b64", "")
-            if not image_b64 or self._session is None:
+            if not image_b64:
                 return
-
-            # Store latest snapshot — used by get_board_image tool
             self._latest_board_snapshot = image_b64
             logger.debug("Board snapshot stored (%d b64 chars)", len(image_b64))
         except Exception as e:
@@ -162,42 +159,66 @@ class TabloAgent(Agent):
         - When you want to check the student's work visually
         - When you're about to explain something and want to see the current board state
 
-        Returns the board as an image you can see directly.
+        Returns a description of what you can see on the board.
         """
         if not self._latest_board_snapshot:
             return "No board snapshot available yet. The board may be empty."
 
-        from livekit.agents import llm as _llm
         try:
-            realtime_model = self._session.llm if self._session else None
-            realtime_session = realtime_model.session if realtime_model else None
-            if realtime_session is None:
-                return "Board image not available — session not ready."
+            from google import genai as _genai
+            from google.genai import types as _types
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            client = _genai.Client(api_key=api_key)
 
-            image_content = _llm.ImageContent(
-                image=f"data:image/png;base64,{self._latest_board_snapshot}",
-                mime_type="image/png",
-                inference_detail="high",  # high detail so you can read text
-            )
-            current_ctx = realtime_session.chat_ctx.copy()
-            current_ctx.add_message(role="user", content=[image_content])
-            realtime_session.update_chat_ctx(current_ctx)
-            logger.info("Board image delivered to Gemini Live via get_board_image tool")
-            return "Board image delivered — you can now see the current whiteboard state."
+            import base64 as _b64
+            png_bytes = _b64.b64decode(self._latest_board_snapshot)
+
+            # Use gemini-2.5-flash to describe what's on the board, with fallback
+            description = ""
+            for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[
+                            _types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
+                            "Describe what is written or drawn on this whiteboard. "
+                            "Be specific about text content, equations, diagrams, shapes, and their positions. "
+                            "If there is handwritten text, transcribe it exactly. "
+                            "Keep the description concise (2-3 sentences max).",
+                        ],
+                    )
+                    description = (response.text or "").strip()
+                    if description:
+                        break
+                except Exception as e:
+                    logger.warning("get_board_image failed with %s: %s", model, e)
+            if not description:
+                return "Board appears to be empty or content is unclear."
+            logger.info("Board image described: %s", description[:100])
+            return f"Current board shows: {description}"
         except Exception as e:
             logger.warning("get_board_image failed: %s", e)
-            return f"Failed to deliver board image: {e}"
+            # Fallback: return that we have a snapshot but couldn't describe it
+            return f"Board snapshot available ({len(self._latest_board_snapshot)} chars) but description failed: {e}"
 
     @function_tool()
     async def search_documents(self, context: RunContext, query: str) -> str:
-        """Search the learner's uploaded documents for relevant passages.
+        """CALL THIS FIRST — mandatory before answering any subject-matter question.
 
-        ALWAYS call this first when the learner asks about any subject-matter topic.
-        Use before answering any question that might be in their study materials.
+        DO NOT answer questions about topics, concepts, definitions, or subjects
+        without calling this tool first. This is not optional.
+
+        When to call: ANY time the learner asks about a topic, concept, or subject.
+        Examples: "what is X", "explain Y", "how does Z work", "solve this problem",
+        "what are the layers of...", "define...", "show me how to..."
 
         Args:
-            query: Concise keyword-rich search query.
+            query: Concise keyword-rich search query describing what to look for.
                    Examples: "OSI model layers", "TCP handshake", "Pythagorean theorem"
+
+        Returns:
+            Relevant content from the learner's uploaded documents, including page
+            numbers and any diagrams available to draw.
         """
         logger.info("search_documents called with query: %s", query[:100])
         try:
@@ -251,27 +272,30 @@ class TabloAgent(Agent):
             hints = [f"p.{r.page_number}: {r.description}" for r in context.diagram_recipes]
             diagram_hints = "\nDiagrams available (call draw_diagram): " + "; ".join(hints)
 
-        try:
-            from google import genai as _genai
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-            client = _genai.Client(api_key=api_key)
-            prompt = (
-                f"The learner asked: \"{query}\"\n\n"
-                f"Retrieved passages:\n{context.context_text[:2000]}\n\n"
-                "Write a concise 3-4 sentence answer covering key facts. "
-                "Include document name and page numbers. No bullet points. Return ONLY the answer."
-            )
-            response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-            summary = (response.text or "").strip()
-            if summary:
-                if len(summary) > 500:
-                    truncated = summary[:500]
-                    last_period = max(truncated.rfind(". "), truncated.rfind(".\n"))
-                    summary = truncated[:last_period + 1] if last_period > 200 else truncated
-                return summary + diagram_hints
-        except Exception as e:
-            logger.warning("Context compression failed: %s", e)
+        prompt = (
+            f"The learner asked: \"{query}\"\n\n"
+            f"Retrieved passages:\n{context.context_text[:2000]}\n\n"
+            "Write a concise 3-4 sentence answer covering key facts. "
+            "Include document name and page numbers. No bullet points. Return ONLY the answer."
+        )
 
+        for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+            try:
+                from google import genai as _genai
+                api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+                client = _genai.Client(api_key=api_key)
+                response = client.models.generate_content(model=model, contents=prompt)
+                summary = (response.text or "").strip()
+                if summary:
+                    if len(summary) > 500:
+                        truncated = summary[:500]
+                        last_period = max(truncated.rfind(". "), truncated.rfind(".\n"))
+                        summary = truncated[:last_period + 1] if last_period > 200 else truncated
+                    return summary + diagram_hints
+            except Exception as e:
+                logger.warning("Context compression failed with %s: %s — trying next model", model, e)
+
+        # Final fallback: truncate raw text
         return context.context_text[:300] + diagram_hints
 
     @function_tool()

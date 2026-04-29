@@ -603,16 +603,19 @@ What shipped:
 
 The continuous video track has been replaced with `BoardSnapshotPublisher` — eliminating the 2-minute session limit while preserving full visual awareness.
 
-- Frontend sends PNG snapshots via `board.snapshot` data topic on three triggers: user starts speaking, board changes while AI is silent (1.5s debounce), board changes while AI is speaking (immediate).
+- Frontend sends PNG snapshots (40% scale, 30KB cap, unreliable channel) via `board.snapshot` data topic on three triggers: user starts speaking, board changes while AI is silent (1.5s debounce), board changes while AI is speaking (immediate).
 - Agent stores the latest snapshot as `_latest_board_snapshot`.
-- `get_board_image` tool lets the agent see the board on demand — reads freehand writing, student drawings, handwritten equations.
+- `get_board_image` tool — agent calls this explicitly to see the board. Uses a separate `gemini-2.5-flash` call (with `flash-lite` fallback) to describe the PNG and returns a text description. Does NOT inject into Live session context (that caused 1008 disconnects).
 - Sessions now run indefinitely. `video_input=False` on `RoomOptions`.
 
 ### Skills System ✅ Shipped
 
 Agent behavior is defined in modular markdown files in `backend/skills/`, not hardcoded in `agent.py`:
 
-- `core_teaching.md`, `drawing_commands.md`, `document_grounding.md`, `learner_adaptation.md`
+- `core_teaching.md` — Socratic method, **MANDATORY TOOL CALL SEQUENCE** (numbered steps, NEVER skip), board-first rules
+- `drawing_commands.md` — full execute_command reference with SVG rules (under 400 chars, no complex paths)
+- `document_grounding.md` — when/how to use RAG and diagrams
+- `learner_adaptation.md` — how to read and update the learner profile
 - `backend/skills_loader.py` assembles the dynamic system prompt = skills + learner profile at session start
 - Edit a skill file and restart the worker — no code changes needed
 
@@ -657,14 +660,15 @@ The frontend also includes a command validation layer that rejects malformed com
 
 A full hybrid RAG pipeline is implemented in `backend/rag/`:
 
-- **Vector store:** Qdrant (self-hosted Docker or Qdrant Cloud). `tablo_shared` collection for single-user/open-source mode. Per-user collections (`tablo_{user_id}`) when auth is added. `backend/rag/vector_store.py` is a thin Qdrant wrapper.
-- **Hybrid retrieval:** vector search (Qdrant + `gemini-embedding-2`, 3072-dim multimodal embeddings) + knowledge graph traversal, fused with Reciprocal Rank Fusion.
-- **Two-phase ingestion:** `POST /documents/upload` returns immediately after text chunking and embedding. Diagram extraction runs as a background task — PDF pages rendered to PNG via PyMuPDF, sent to Gemini 2.5 Flash vision to extract diagram descriptions and store page images as base64. Diagram images also embedded directly via `gemini-embedding-2` multimodal for visual retrieval.
+- **Vector store:** Qdrant (self-hosted Docker or Qdrant Cloud). `tablo_shared` collection for single-user/open-source mode. Per-user collections (`tablo_{user_id}`) when auth is added. Payload indexes on `doc_id`, `page_number`, `chunk_index` for fast filtering.
+- **Hybrid retrieval:** vector search (Qdrant + `gemini-embedding-2`, 3072-dim multimodal embeddings) + knowledge graph traversal, fused with Reciprocal Rank Fusion. Threshold 0.1.
+- **Async ingestion:** `POST /documents/upload` returns immediately with `status: "processing"`. All ingestion (parse → chunk → embed → store) runs in background. Concurrent embeddings with semaphore(5).
+- **Diagram extraction:** PDF pages rendered to PNG via PyMuPDF, sent to Gemini 2.5 Flash vision to extract diagram descriptions and store page images as base64. Diagram images also embedded directly via `gemini-embedding-2` multimodal for visual retrieval.
 - **On-demand diagram drawing:** `draw_diagram(page_number)` tool fetches the stored page image and generates accurate tldraw commands from the actual visual.
-- **Context compression:** `search_documents` result compressed to ≤500 chars via gemini-2.5-flash before returning to Gemini Live, preventing 1008/1011 WebSocket disconnects.
+- **Context compression:** `search_documents` result compressed to ≤500 chars via `gemini-2.5-flash` (fallback: `gemini-2.5-flash-lite`) before returning to Gemini Live, preventing 1008/1011 WebSocket disconnects.
 - **Source transparency:** retrieved sources published to frontend via `tutor.sources` LiveKit data topic; `SourcePanel` component shows document name, page, section, and relevance.
-- **RAG injection:** context flows through the `search_documents` tool only. The warm-path `update_instructions` injection has been removed — it was getting compressed away by the sliding window.
-- **Context window compression:** `ContextWindowCompressionConfig` with sliding window enabled on the RealtimeModel.
+- **RAG injection:** context flows through the `search_documents` tool only. The warm-path orchestrator also injects context via `update_instructions` as a safety net — even if the model skips the tool call, the student gets RAG-grounded responses.
+- **Tool call reliability:** 100% measured across 10 subject-matter questions with the numbered-steps system prompt.
 
 ### Multi-Format Document Viewer Panel ✅ Shipped
 
@@ -677,6 +681,25 @@ A document viewer panel alongside the whiteboard, supporting 17 file formats wit
 - `react-pdf` renders actual PDF pages with prev/next navigation and text layer highlighting.
 - AI auto-opens panel, jumps to correct page, highlights referenced excerpt.
 - Select text in viewer → "Ask AI about this" floating tooltip → sends via `learner.context` → agent prepends to next `search_documents` query.
+
+### Automated Test Suite ✅ Shipped
+
+A comprehensive automated test suite in `backend/tests/` covering all major system components.
+
+```bash
+cd backend && python tests/run_all.py --no-drawing   # fast, ~35s
+cd backend && python tests/run_all.py                # full suite
+```
+
+| Suite | Tests | Score | Notes |
+|-------|-------|-------|-------|
+| Skills | 6/6 | 100% | No external deps |
+| Formats | 6/6 | 100% | No external deps |
+| RAG | 6/6 | 100% | Requires Qdrant + Gemini |
+| Drawing | 19/20 | 95% | 20 diagrams across 5 domains |
+| Agent — tool call rate | 10/10 | 100% | search_documents called every time |
+| Agent — board image | 1/1 | 100% | |
+| Agent — Socratic quality | 1/1 | 80% | Questions every turn, no full answers given immediately |
 
 ### Week 2: Socratic Interaction and Live Tutor Layer
 

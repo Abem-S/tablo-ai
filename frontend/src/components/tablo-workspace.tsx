@@ -4451,25 +4451,29 @@ function BoardSnapshotPublisher({
     if (!editor || !isConnected) return;
     try {
       const pageShapeIds = [...editor.getCurrentPageShapeIds()];
-      // Skip if board is empty
       if (pageShapeIds.length === 0) return;
 
       const imageResult = await editor.toImage(pageShapeIds, {
         format: "png",
         background: true,
-        padding: 32,
-        scale: 0.75, // 75% scale — enough for Gemini to read, smaller token cost
+        padding: 16,
+        scale: 0.4, // 40% scale — keeps payload small, Gemini can still read it
       });
 
       const arrayBuffer = await imageResult.blob.arrayBuffer();
       const bytes = new Uint8Array(arrayBuffer);
+
+      // Hard cap at 30KB to protect audio bandwidth
+      if (bytes.length > 30_000) {
+        console.debug("[BoardSnapshotPublisher] Snapshot too large, skipping:", bytes.length);
+        return;
+      }
 
       // Simple hash to avoid sending identical snapshots
       const hash = bytes.length.toString() + bytes[0] + bytes[bytes.length - 1];
       if (hash === lastSnapshotHashRef.current) return;
       lastSnapshotHashRef.current = hash;
 
-      // Encode as base64 and wrap in a JSON envelope
       let binary = "";
       for (let i = 0; i < bytes.length; i++) {
         binary += String.fromCharCode(bytes[i]);
@@ -4477,9 +4481,10 @@ function BoardSnapshotPublisher({
       const b64 = btoa(binary);
 
       const payload = JSON.stringify({ type: "board.snapshot", image_b64: b64, mime: "image/png" });
+      // Use unreliable channel — snapshots are best-effort, audio takes priority
       await room.localParticipant.publishData(
         new TextEncoder().encode(payload),
-        { reliable: true, topic: "board.snapshot" }
+        { reliable: false, topic: "board.snapshot" }
       );
     } catch (e) {
       console.warn("[BoardSnapshotPublisher] Failed to capture/send snapshot:", e);

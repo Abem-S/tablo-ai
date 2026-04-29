@@ -196,3 +196,48 @@ When making changes:
 3. Keep temporary development scaffolding explicitly temporary.
 4. If unsure whether a UI element is meant to be final product UX, assume it is **not** unless it fits the voice-first, board-first direction.
 5. Prefer honest progress over flashy but misleading demos.
+
+## Automated Test Suite
+
+The test suite lives in `backend/tests/`. Run before committing changes.
+
+```bash
+# Fast (no drawing, ~35s)
+cd backend && python tests/run_all.py --no-drawing
+
+# Full suite including drawing quality tests
+cd backend && python tests/run_all.py
+
+# Individual suites
+python tests/test_skills.py          # skills + learner memory (no external deps)
+python tests/test_formats.py         # document parsers (no external deps)
+python tests/test_rag.py             # RAG pipeline (requires Qdrant + Gemini API)
+python tests/test_drawing.py         # drawing quality (requires Gemini API)
+python tests/test_agent_behavior.py  # tool call rate, board vision, Socratic quality
+```
+
+### Current Results (as of last run)
+
+| Category | Pass | Score | Notes |
+|----------|------|-------|-------|
+| Skills | 6/6 | 100% | No external deps |
+| Formats | 6/6 | 100% | No external deps |
+| RAG | 6/6 | 100% | Requires Qdrant + Gemini |
+| Drawing | 19/20 | 95% | One JSON truncation blip |
+| Agent — tool call rate | 10/10 | 100% | search_documents called every time |
+| Agent — board image | 1/1 | 100% | Pythagorean theorem described correctly |
+| Agent — Socratic quality | 1/1 | 80% | Questions asked every turn, no full answers given immediately |
+| Agent — concurrent Qdrant | known blocker | — | Requires auth for user isolation |
+
+### Known Blocker
+
+`agent/concurrent_qdrant` fails because all users share `tablo_shared` — no user isolation without auth. This is expected and documented. Fix: implement auth, then wire `user_id` through to `IngestionPipeline(user_id=...)` and `RetrievalPipeline(user_id=...)`.
+
+### What Tests Don't Cover (manual testing required)
+
+- End-to-end voice loop (requires real microphone + LiveKit session)
+- Board snapshot → visual awareness in a live session
+- AI drawing appearing correctly in tldraw (requires browser)
+- Document viewer navigation in a connected session
+- Long session stability (30+ minutes)
+- Audio quality under load

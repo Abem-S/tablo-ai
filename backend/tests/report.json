@@ -1,0 +1,257 @@
+{
+  "timestamp": "2026-04-29T19:49:13.365641+00:00",
+  "total_elapsed_ms": 180239.9,
+  "summary": {
+    "total": 22,
+    "passed": 20,
+    "failed": 2,
+    "avg_score": 0.92
+  },
+  "categories": {
+    "drawing": {
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "avg_latency_ms": 0,
+      "avg_score": 0.0,
+      "issues": []
+    },
+    "rag": {
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "avg_latency_ms": 4403.9,
+      "avg_score": 1.0,
+      "issues": []
+    },
+    "skills": {
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "avg_latency_ms": 0.3,
+      "avg_score": 1.0,
+      "issues": []
+    },
+    "formats": {
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "avg_latency_ms": 158.1,
+      "avg_score": 1.0,
+      "issues": []
+    },
+    "agent": {
+      "passed": 2,
+      "failed": 2,
+      "skipped": 0,
+      "avg_latency_ms": 36547.7,
+      "avg_score": 0.562,
+      "issues": [
+        "Data isolation breach — per-user collections not working correctly"
+      ]
+    }
+  },
+  "recommendations": [
+    "Add Qdrant payload index on doc_id — retrieval 3674ms > 2000ms target"
+  ],
+  "results": [
+    {
+      "name": "rag/ingestion_latency",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 19272.6,
+      "details": "Status: complete, chunks: 1, concepts: 11, 19273ms",
+      "recommendation": "Ingestion >10s — consider batching embeddings",
+      "skipped": false
+    },
+    {
+      "name": "rag/retrieval_latency",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 3673.9,
+      "details": "Latency: 3674ms, sources: 1",
+      "recommendation": "Add Qdrant payload index on doc_id",
+      "skipped": false
+    },
+    {
+      "name": "rag/retrieval_quality",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 1762.8,
+      "details": "Sources: 1, OSI: True, layers: True, 7: True",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "rag/threshold_behavior",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 1612.6,
+      "details": "Sources at threshold=0.7: 0, is_general: True",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "rag/knowledge_graph",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.0,
+      "details": "Total concepts: 11, networking-related: 10",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "rag/diagram_recipe_storage",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 101.3,
+      "details": "Points: 1, all have field: True, no missing: True, valid JSON: True",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "skills/loading",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.5,
+      "details": "Loaded 4/4 files\n  core_teaching.md: 2606 chars\n  learner_adaptation.md: 1858 chars\n  document_grounding.md: 1412 chars\n  drawing_commands.md: 4790 chars",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "skills/prompt_assembly",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.1,
+      "details": "Length: 10687 chars, sections: 4",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "skills/profile_injection",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.4,
+      "details": "Prompt length: 10868 chars",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "skills/content_validation",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.2,
+      "details": "Checked 6 phrases in 10687 chars",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "skills/profile_persistence",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.4,
+      "details": "All fields persisted correctly",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "skills/profile_update_logic",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.1,
+      "details": "All update logic correct",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "formats/txt",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.6,
+      "details": "Pages: 3, chars: 120, titles: ['INTRODUCTION:', 'OSI MODEL:', 'TRANSPORT LAYER:']",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "formats/csv",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.4,
+      "details": "Pages: 1, chars: 77",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "formats/html",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 341.2,
+      "details": "Pages: 1, chars: 104",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "formats/docx",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 206.7,
+      "details": "Pages: 4, chars: 198, titles: ['Network Fundamentals', 'Network Fundamentals', 'The OSI Model']",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "formats/pptx",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 399.4,
+      "details": "Slides: 3, chars: 218, pages: [1, 2, 3]",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "formats/viewer_routing",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 0.0,
+      "details": "Tested 11 mappings",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "agent/tool_call_rate",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 27067.2,
+      "details": "Called search_documents: 10/10 (100%)\n✓ What is the OSI model?\n✓ Explain TCP handshake\n✓ What are the layers of the network stack?\n✓ How does subnetting work?\n✓ What is the difference between TCP and UDP?\n✓ Explain the Pythagorean theorem\n✓ What is a derivative in calculus?\n✓ How do logic gates work?\n✓ What is supply and demand?\n✓ Explain Newton's second law",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "agent/board_image_description",
+      "passed": true,
+      "score": 1.0,
+      "latency_ms": 3913.7,
+      "details": "Description (236 chars): The whiteboard displays the equation \"a² + b² = c²\" (where the squares are indicated by small box symbols due to a rendering issue) centered towards the left side. Directly below this equation, the te",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "agent/socratic_quality",
+      "passed": false,
+      "score": 0.0,
+      "latency_ms": 8003.0,
+      "details": "No turns completed",
+      "recommendation": "",
+      "skipped": false
+    },
+    {
+      "name": "agent/concurrent_qdrant",
+      "passed": false,
+      "score": 0.25,
+      "latency_ms": 107207.1,
+      "details": "3 concurrent ingestions in 87530ms, isolation: BREACH\nIssues: User 0 can see user 1's content (isolation breach)\nUser 1 can see user 2's content (isolation breach)\nUser 2 can see user 0's content (isolation breach)",
+      "recommendation": "Data isolation breach — per-user collections not working correctly",
+      "skipped": false
+    }
+  ]
+}

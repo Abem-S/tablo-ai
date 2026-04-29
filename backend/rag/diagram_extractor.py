@@ -138,6 +138,8 @@ class DiagramExtractor:
             "SVG rules: fill='none' stroke='black' stroke-width='2'. Use <text> for labels inside SVG. "
             "viewBox must match your coordinate space.\n"
             "Board: x 0–800, y 0–600. Max 8 commands. "
+            "CRITICAL: Keep SVG under 400 characters. Use simple shapes only: "
+            "<rect>, <circle>, <line>, <polygon>, <text>. Never use complex <path> elements.\n"
             "For a complex diagram, use ONE create_svg that captures the whole structure.\n"
             "Return ONLY a valid JSON array, no markdown, no explanation."
         )

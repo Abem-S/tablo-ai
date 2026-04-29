@@ -250,9 +250,9 @@ async def upload_document(
 ) -> IngestionResponse:
     """Upload a document and trigger the ingestion pipeline.
 
-    Supports: pdf, txt, docx, doc, pptx, rtf, png, jpg, jpeg, webp, heif, xlsx, xls, csv, tsv, html, hwp.
-    Text chunking and embedding complete synchronously.
-    Diagram extraction runs as a background task so the response is fast.
+    Returns immediately with status='processing'. Ingestion (parse → chunk → embed)
+    runs in the background so the student can start talking right away.
+    The document becomes searchable once ingestion completes (~5-30s depending on size).
     """
     filename = file.filename or "document"
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
@@ -263,41 +263,36 @@ async def upload_document(
             detail=f"Unsupported format '{ext}'. Supported: {supported}",
         )
 
-    # Save upload to disk
-    save_path = os.path.join(_UPLOADS_DIR, f"{uuid4().hex}_{filename}")
+    # Save upload to disk immediately
+    doc_id = uuid4().hex
+    save_path = os.path.join(_UPLOADS_DIR, f"{doc_id}_{filename}")
     try:
         with open(save_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}") from e
 
-    # Phase 1: parse → chunk → embed → store (fast, synchronous)
-    try:
-        result = await _ingestion.ingest_document_fast(file_path=save_path, doc_name=filename)
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    # Run full ingestion in background — student doesn't wait
+    async def _ingest_and_extract():
+        try:
+            result = await _ingestion.ingest_document_fast(file_path=save_path, doc_name=filename)
+            if result.status == "complete" and ext in _ingestion._DIAGRAM_FORMATS:
+                await _ingestion.extract_and_attach_diagrams(file_path=save_path, doc_id=result.doc_id)
+        except Exception as e:
+            import logging
+            logging.getLogger("tablo.upload").error("Background ingestion failed for %s: %s", filename, e)
 
-    if result.status == "failed":
-        raise HTTPException(status_code=500, detail=result.error_message or "Ingestion failed")
+    background_tasks.add_task(_ingest_and_extract)
 
-    # Phase 2: diagram extraction runs in background (PDF and images only)
-    if ext in _ingestion._DIAGRAM_FORMATS:
-        background_tasks.add_task(
-            _ingestion.extract_and_attach_diagrams,
-            file_path=save_path,
-            doc_id=result.doc_id,
-        )
-
+    # Return immediately — doc_id is the uuid prefix we generated
     return IngestionResponse(
-        doc_id=result.doc_id,
+        doc_id=doc_id,
         name=filename,
-        chunk_count=result.chunk_count,
-        concept_count=result.concept_count,
-        diagram_count=0,  # diagrams processing in background
-        status=result.status,
-        error_message=result.error_message,
+        chunk_count=0,
+        concept_count=0,
+        diagram_count=0,
+        status="processing",
+        error_message=None,
     )
 
 

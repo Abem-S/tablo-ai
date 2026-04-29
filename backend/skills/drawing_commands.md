@@ -37,6 +37,9 @@ Use `get_board_image` (a separate tool) when you need to SEE the board visually 
 ```
 Expression syntax: `sin(x)`, `cos(x)`, `tan(x)`, `x^2`, `sqrt(x)`, `log(x)`, `exp(x)`, `abs(x)`, `pi`, `e`
 
+**Use `create_graph` for any y=f(x) function** — it evaluates accurately on the frontend.
+**Use `create_svg` for custom graphs** (supply/demand, indifference curves, Bode plots) — draw them as simple SVG lines, not complex paths. Supply/demand example: two straight diagonal lines crossing, labeled D and S.
+
 ## Parametric Graphs
 
 ```json
@@ -57,6 +60,9 @@ Expression syntax: `sin(x)`, `cos(x)`, `tan(x)`, `x^2`, `sqrt(x)`, `log(x)`, `ex
 - Always `fill='none'` and `stroke='black'` `stroke-width='2'`
 - `viewBox` must match your coordinate space
 - For `<rect>` ALWAYS include `x`, `y`, `width`, AND `height`
+- **Keep SVG concise** — avoid complex path data. If an SVG would need more than 5-6 elements, use multiple simpler commands instead
+- **For pie charts** — use `create_geo` ellipses with `create_text` labels, not SVG arc paths
+- **For bar charts** — use multiple `create_geo` rectangles with `create_text` labels
 
 ```json
 {"op":"create_svg","svg":"<svg viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='none' stroke='black' stroke-width='2'/></svg>","x":100,"y":100,"w":150,"h":150}

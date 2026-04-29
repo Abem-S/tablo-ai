@@ -61,8 +61,13 @@ class RAGOrchestrator:
         # Retrieve
         result = await self._retrieval.retrieve(query=query, turn_id=turn_id)
 
-        # Publish sources to frontend (context injection removed — tool path handles RAG)
+        # Always publish sources to frontend for viewer navigation
         await self.publish_sources(result.context.sources, turn_id, result.context.is_general_knowledge)
+
+        # Safety net: if relevant content found, inject into agent instructions
+        # This fires even if the model skips calling search_documents directly
+        if not result.context.is_general_knowledge and result.context.context_text:
+            await self.inject_context(result.context, turn_id)
 
     # ------------------------------------------------------------------
     # Query rewriting

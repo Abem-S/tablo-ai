@@ -234,11 +234,24 @@ class IngestionPipeline:
     # ------------------------------------------------------------------
 
     async def generate_embeddings(self, chunks: list[Chunk]) -> list[ChunkWithEmbedding]:
-        results: list[ChunkWithEmbedding] = []
-        for chunk in chunks:
-            embedding = await self._embed_text_with_retry(chunk.text, task_type="RETRIEVAL_DOCUMENT")
-            results.append(ChunkWithEmbedding(chunk=chunk, embedding=embedding))
-        return results
+        """Generate embeddings for all chunks concurrently.
+
+        gemini-embedding-2 doesn't support true batch input, but we can run
+        multiple calls in parallel. Semaphore limits to 5 concurrent calls
+        to stay within rate limits while being ~5x faster than sequential.
+        """
+        if not chunks:
+            return []
+
+        semaphore = asyncio.Semaphore(5)  # max 5 concurrent embedding calls
+
+        async def embed_one(chunk: Chunk) -> ChunkWithEmbedding:
+            async with semaphore:
+                embedding = await self._embed_text_with_retry(chunk.text, task_type="RETRIEVAL_DOCUMENT")
+                return ChunkWithEmbedding(chunk=chunk, embedding=embedding)
+
+        results = await asyncio.gather(*[embed_one(c) for c in chunks])
+        return list(results)
 
     async def _embed_text_with_retry(self, text: str, task_type: str, retries: int = 2) -> list[float]:
         from google.genai import types as genai_types

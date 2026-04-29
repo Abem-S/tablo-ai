@@ -43,17 +43,37 @@ def collection_name(user_id: str | None = None) -> str:
 
 
 def ensure_collection(client, name: str) -> None:
-    """Create the collection if it doesn't exist."""
-    from qdrant_client.models import Distance, VectorParams
+    """Create the collection if it doesn't exist, with payload indexes for fast filtering."""
+    from qdrant_client.models import Distance, VectorParams, PayloadSchemaType
     existing = {c.name for c in client.get_collections().collections}
     if name not in existing:
         client.create_collection(
             collection_name=name,
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
         )
-        logger.info("Created Qdrant collection: %s", name)
+        logger.info("Created Qdrant collection with payload indexes: %s", name)
     else:
         logger.debug("Qdrant collection already exists: %s", name)
+    # Always ensure indexes exist (idempotent — safe to call on existing collections)
+    _ensure_payload_indexes(client, name)
+
+
+def _ensure_payload_indexes(client, name: str) -> None:
+    """Create payload indexes if they don't already exist. Idempotent."""
+    from qdrant_client.models import PayloadSchemaType
+    try:
+        info = client.get_collection(name)
+        existing_indexes = set(info.payload_schema.keys()) if info.payload_schema else set()
+        for field, schema in [
+            ("doc_id", PayloadSchemaType.KEYWORD),
+            ("page_number", PayloadSchemaType.INTEGER),
+            ("chunk_index", PayloadSchemaType.INTEGER),
+        ]:
+            if field not in existing_indexes:
+                client.create_payload_index(collection_name=name, field_name=field, field_schema=schema)
+                logger.debug("Created payload index: %s.%s", name, field)
+    except Exception as e:
+        logger.warning("Could not ensure payload indexes for %s: %s", name, e)
 
 
 def upsert_chunks(
