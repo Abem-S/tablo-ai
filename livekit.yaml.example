@@ -5,7 +5,8 @@ port: 7880
 bind_addresses:
   - ""
 
-# Must match LIVEKIT_API_KEY: LIVEKIT_API_SECRET in backend/.env
+# Must match LIVEKIT_API_KEY: LIVEKIT_API_SECRET in backend/.env or your secrets manager
+# Do NOT commit real secrets. Use a secrets manager (Vault/AWS/GCP) or Docker secrets.
 keys:
   your-api-key: your-api-secret
 

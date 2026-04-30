@@ -1,5 +1,6 @@
 import os
 import shutil
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -8,12 +9,16 @@ load_dotenv()
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from rag.ingestion import IngestionPipeline
 from rag.knowledge_graph import KnowledgeGraph
 from learner_memory import load_profile, save_profile, apply_update
+from config import get_env
+from observability import init_tracing, record_http_metrics
 
 _UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "data", "uploads")
 os.makedirs(_UPLOADS_DIR, exist_ok=True)
@@ -31,6 +36,9 @@ app = FastAPI(
     version="0.1.0",
 )
 
+init_tracing("tablo-api")
+FastAPIInstrumentor.instrument_app(app)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
@@ -38,6 +46,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _metrics_middleware(request, call_next):
+    start = time.monotonic()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        path = route.path if route else request.url.path
+        duration = time.monotonic() - start
+        record_http_metrics(request.method, path, status_code, duration)
 
 
 class SessionBootstrapResponse(BaseModel):
@@ -90,7 +113,19 @@ class LiveKitTokenResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    status = {"status": "ok"}
+    if os.getenv("HEALTH_CHECK_QDRANT", "false").lower() == "true":
+        try:
+            _ingestion._client.get_collections()
+            status["qdrant"] = "ok"
+        except Exception as e:
+            status["qdrant"] = f"error: {e}"
+    return status
+
+
+@app.get("/metrics")
+def metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/session/bootstrap", response_model=SessionBootstrapResponse)
@@ -126,9 +161,9 @@ def board_snapshot(payload: BoardSnapshotRequest) -> BoardSnapshotResponse:
 
 @app.get("/realtime/config", response_model=RealtimeConfigResponse)
 def realtime_config() -> RealtimeConfigResponse:
-    livekit_url = os.getenv("LIVEKIT_URL")
-    api_key = os.getenv("LIVEKIT_API_KEY")
-    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    livekit_url = get_env("LIVEKIT_URL")
+    api_key = get_env("LIVEKIT_API_KEY")
+    api_secret = get_env("LIVEKIT_API_SECRET")
 
     configured = bool(livekit_url and api_key and api_secret)
 
@@ -150,9 +185,9 @@ def realtime_config() -> RealtimeConfigResponse:
 
 @app.post("/livekit/token", response_model=LiveKitTokenResponse)
 async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
-    livekit_url = os.getenv("LIVEKIT_URL")
-    api_key = os.getenv("LIVEKIT_API_KEY")
-    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    livekit_url = get_env("LIVEKIT_URL")
+    api_key = get_env("LIVEKIT_API_KEY")
+    api_secret = get_env("LIVEKIT_API_SECRET")
 
     if not livekit_url or not api_key or not api_secret:
         raise HTTPException(

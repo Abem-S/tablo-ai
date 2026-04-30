@@ -1,0 +1,33 @@
+groups:
+  - name: tablo.alerts
+    rules:
+      - alert: TabloApiHighErrorRate
+        expr: |
+          sum(rate(tablo_http_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(tablo_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "High 5xx error rate in Tablo API"
+          description: "5xx error rate > 5% over 5m"
+
+      - alert: TabloRagHighLatency
+        expr: |
+          histogram_quantile(0.95, sum(rate(tablo_rag_retrieval_latency_seconds_bucket[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "RAG retrieval latency p95 > 2s"
+          description: "Check Qdrant health and Gemini embedding latency"
+
+      - alert: TabloAgentDown
+        expr: tablo_agent_up == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Tablo agent worker down"
+          description: "Agent health gauge reported down"

@@ -9,10 +9,12 @@ from uuid import uuid4
 
 from .models import RetrievalContext, SourceAttribution
 from .retrieval import RetrievalPipeline
+from config import get_env
 
 logger = logging.getLogger("tablo-rag.orchestrator")
 
 _RETRIEVAL_TIMEOUT_S = 5.0
+_REWRITE_TIMEOUT_S = float(os.getenv("RAG_REWRITE_TIMEOUT_S", "4"))
 
 
 class RAGOrchestrator:
@@ -77,7 +79,9 @@ class RAGOrchestrator:
         """Rewrite messy speech transcript into a retrieval-optimized query."""
         try:
             from google import genai
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError("Gemini API key not configured")
             client = genai.Client(api_key=api_key)
 
             context_parts = []
@@ -97,9 +101,13 @@ class RAGOrchestrator:
                 f"Spoken question: {transcript}"
             )
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                ),
+                timeout=_REWRITE_TIMEOUT_S,
             )
             rewritten = (response.text or "").strip()
             logger.debug("Query rewritten: '%s' → '%s'", transcript[:60], rewritten[:60])

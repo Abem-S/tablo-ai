@@ -25,6 +25,7 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
+      - ./qdrant_backups:/qdrant/snapshots
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
@@ -75,6 +76,33 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── Production backend (profile: prod) ───────────────────────────────────
+  backend-prod:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    container_name: tablo-backend-prod
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - LIVEKIT_API_KEY_FILE=/run/secrets/livekit_api_key
+      - LIVEKIT_API_SECRET_FILE=/run/secrets/livekit_api_secret
+      - GOOGLE_API_KEY_FILE=/run/secrets/google_api_key
+    volumes:
+      - ./backend/data/uploads:/app/data/uploads
+      - ./backend/data/learner_profiles:/app/data/learner_profiles
+      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - prod
+
   # ── Agent worker ───────────────────────────────────────────────────────────
   # Run with: docker compose --profile agent up agent
   agent:
@@ -87,6 +115,8 @@ services:
       - ./backend/.env
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - AGENT_METRICS_ENABLED=true
+      - AGENT_METRICS_PORT=9091
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
@@ -96,6 +126,125 @@ services:
         condition: service_healthy
     profiles:
       - agent
+
+  # ── Production agent worker (profile: prod) ──────────────────────────────
+  agent-prod:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    container_name: tablo-agent-prod
+    command: python agent.py dev
+    env_file:
+      - ./backend/.env
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - LIVEKIT_API_KEY_FILE=/run/secrets/livekit_api_key
+      - LIVEKIT_API_SECRET_FILE=/run/secrets/livekit_api_secret
+      - GOOGLE_API_KEY_FILE=/run/secrets/google_api_key
+      - AGENT_METRICS_ENABLED=true
+      - AGENT_METRICS_PORT=9091
+    volumes:
+      - ./backend/data/uploads:/app/data/uploads
+      - ./backend/data/learner_profiles:/app/data/learner_profiles
+      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles:
+      - prod
+
+  # ── Observability stack (Prometheus + Grafana + Loki) ────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tablo-prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    profiles:
+      - observability
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tablo-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    profiles:
+      - observability
+
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: tablo-loki
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/config.yml:ro
+    ports:
+      - "3100:3100"
+    profiles:
+      - observability
+
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: tablo-promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./observability/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    profiles:
+      - observability
+
+  # ── Vault (dev-only secrets manager) ─────────────────────────────────────
+  vault:
+    image: hashicorp/vault:1.15
+    container_name: tablo-vault
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=tablo-dev-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    profiles:
+      - secrets
+
+  # ── Maintenance helpers ─────────────────────────────────────────────────
+  qdrant-backup:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tablo-qdrant-backup
+    command: python scripts/qdrant_snapshot.py
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - ./qdrant_backups:/qdrant/snapshots
+      - ./backend/scripts:/app/scripts:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles:
+      - maintenance
+
+  qdrant-migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tablo-qdrant-migrate
+    command: python scripts/qdrant_migrate.py
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+    volumes:
+      - ./backend/scripts:/app/scripts:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    profiles:
+      - maintenance
 
 volumes:
   qdrant_data:

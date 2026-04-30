@@ -185,6 +185,9 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 - The agent uses `google.beta.realtime.RealtimeModel` — note the `beta` namespace.
 - The `execute_command` tool is the single entry point for all board drawing. Do not add separate per-shape tools.
 - The `calculate` tool must be used for all arithmetic — never let the model guess math.
+- **`calculate` uses `math_eval.evaluate_expression()` — never use raw `eval()` anywhere in the codebase.**
+- **All credentials via `config.get_env()` — never `os.getenv()` directly for secrets.**
+- **All agent tools wrapped in `_observe_tool()` — do not bypass this for new tools.**
 - Qdrant must be running before starting the backend or agent: `docker compose up qdrant -d`.
 
 ## Agent Behavior for This Repo
@@ -211,6 +214,8 @@ cd backend && python tests/run_all.py
 # Individual suites
 python tests/test_skills.py          # skills + learner memory (no external deps)
 python tests/test_formats.py         # document parsers (no external deps)
+python tests/test_calculate.py       # safe math eval (no external deps)
+python tests/test_compression.py     # RAG compression (no external deps)
 python tests/test_rag.py             # RAG pipeline (requires Qdrant + Gemini API)
 python tests/test_drawing.py         # drawing quality (requires Gemini API)
 python tests/test_agent_behavior.py  # tool call rate, board vision, Socratic quality
@@ -222,9 +227,11 @@ python tests/test_agent_behavior.py  # tool call rate, board vision, Socratic qu
 |----------|------|-------|-------|
 | Skills | 6/6 | 100% | No external deps |
 | Formats | 6/6 | 100% | No external deps |
+| Calculate | 10/10 | 100% | No external deps — safe eval, edge cases, injection rejection |
+| Compression | 5/5 | 100% | No external deps — max_chars, truncation, diagram hints |
 | RAG | 6/6 | 100% | Requires Qdrant + Gemini |
 | Drawing | 19/20 | 95% | One JSON truncation blip |
-| Agent — tool call rate | 10/10 | 100% | search_documents called every time |
+| Agent — tool call rate | 9-10/10 | 90-100% | search_documents called on subject questions |
 | Agent — board image | 1/1 | 100% | Pythagorean theorem described correctly |
 | Agent — Socratic quality | 1/1 | 80% | Questions asked every turn, no full answers given immediately |
 | Agent — concurrent Qdrant | known blocker | — | Requires auth for user isolation |

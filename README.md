@@ -687,19 +687,73 @@ A document viewer panel alongside the whiteboard, supporting 17 file formats wit
 A comprehensive automated test suite in `backend/tests/` covering all major system components.
 
 ```bash
-cd backend && python tests/run_all.py --no-drawing   # fast, ~35s
-cd backend && python tests/run_all.py                # full suite
+cd backend && python tests/run_all.py --no-drawing   # fast, ~35s, no Gemini API needed
+cd backend && python tests/run_all.py                # full suite including drawing
+python tests/test_calculate.py                       # safe math eval (no external deps)
+python tests/test_compression.py                     # RAG compression (no external deps)
 ```
 
 | Suite | Tests | Score | Notes |
 |-------|-------|-------|-------|
 | Skills | 6/6 | 100% | No external deps |
 | Formats | 6/6 | 100% | No external deps |
+| Calculate | 10/10 | 100% | No external deps — safe eval, edge cases, injection rejection |
+| Compression | 5/5 | 100% | No external deps — max_chars, truncation, diagram hints |
 | RAG | 6/6 | 100% | Requires Qdrant + Gemini |
 | Drawing | 19/20 | 95% | 20 diagrams across 5 domains |
-| Agent — tool call rate | 10/10 | 100% | search_documents called every time |
+| Agent — tool call rate | 9-10/10 | 90-100% | search_documents called on subject questions |
 | Agent — board image | 1/1 | 100% | |
 | Agent — Socratic quality | 1/1 | 80% | Questions every turn, no full answers given immediately |
+
+### Safe Math Evaluator ✅ Shipped
+
+`backend/math_eval.py` — replaces unsafe `eval()` in the `calculate` tool with `asteval`.
+
+- `evaluate_expression(expr)` — sandboxed evaluator, only math functions exposed
+- `MathEvaluationError` — raised on invalid/unsafe input
+- 200-character hard cap to prevent DoS
+- Rejects `__import__`, `exec`, `eval`, and all non-math operations
+- Supports: arithmetic, trig, sqrt, log, factorial, pi, e, `^` as exponent
+
+### Secrets & Config ✅ Shipped
+
+`backend/config.py` — `get_env(name)` reads secrets in priority order:
+
+1. `{NAME}_FILE` — Docker secrets / Kubernetes secrets file path
+2. Environment variable
+3. HashiCorp Vault (if `VAULT_ADDR` + `VAULT_TOKEN` set, uses `hvac`)
+
+All `os.getenv()` calls for secrets replaced with `get_env()` throughout the codebase. `secrets/` directory contains a README explaining the expected files — actual secret files are gitignored.
+
+### Observability & Metrics ✅ Shipped
+
+`backend/observability.py` — Prometheus metrics, OpenTelemetry tracing, agent health server.
+
+**Prometheus metrics:**
+- `tablo_http_requests_total` / `tablo_http_request_latency_seconds` — API layer
+- `tablo_agent_tool_calls_total` / `tablo_agent_tool_errors_total` / `tablo_agent_tool_latency_seconds` — per tool
+- `tablo_rag_retrieval_latency_seconds` / `tablo_rag_retrieval_errors_total` — RAG pipeline
+- `tablo_rag_compression_latency_seconds` / `tablo_rag_compression_truncations_total` — context compression
+- `tablo_agent_up` — agent health gauge
+
+**Endpoints:**
+- `GET /metrics` on FastAPI — Prometheus scrape endpoint
+- Agent worker exposes `/health` + `/metrics` on port 9091 (configurable via `AGENT_METRICS_PORT`)
+
+**Tracing:** OpenTelemetry spans on every tool call. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export to Jaeger/Tempo/etc.
+
+**Observability stack** (`observability/`): Prometheus config, Grafana dashboards, Loki log aggregation, Promtail, alerting rules.
+
+### CI/CD ✅ Shipped
+
+`.github/workflows/ci.yml` — runs `python tests/run_all.py --no-drawing` on every push and pull request.
+
+### Qdrant Backup Scripts ✅ Shipped
+
+`backend/scripts/`:
+- `qdrant_snapshot.py` — create a Qdrant collection snapshot
+- `qdrant_restore.py` — restore from snapshot
+- `qdrant_migrate.py` — migrate data between collections
 
 ### Week 2: Socratic Interaction and Live Tutor Layer
 

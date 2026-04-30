@@ -6,6 +6,8 @@ Usage:
     cd backend && python tests/run_all.py --skills-only
     cd backend && python tests/run_all.py --rag-only
     cd backend && python tests/run_all.py --formats-only
+    cd backend && python tests/run_all.py --calculate-only
+    cd backend && python tests/run_all.py --compression-only
     cd backend && python tests/run_all.py --json       # print JSON report
 """
 from __future__ import annotations
@@ -59,7 +61,29 @@ def _run_formats():
     except Exception as e:
         return [TestResult("formats/suite_error",False,0.0,0.0,f"Suite error: {e}")]
 
-def _recommendations(drawing, rag, skills, formats):
+def _run_calculate():
+    try:
+        import tests.test_calculate as m
+        return [TestResult(**{k:getattr(r,k) for k in TestResult.__dataclass_fields__}) for r in m.run_all()]
+    except Exception as e:
+        return [TestResult("calculate/suite_error",False,0.0,0.0,f"Suite error: {e}")]
+
+async def _run_compression():
+    try:
+        import tests.test_compression as m
+        raw = await m._run_all()
+        return [TestResult(**{k:getattr(r,k) for k in TestResult.__dataclass_fields__}) for r in raw]
+    except Exception as e:
+        return [TestResult("compression/suite_error",False,0.0,0.0,f"Suite error: {e}")]
+
+def _run_calculate():
+    try:
+        import tests.test_calculate as m
+        return [TestResult(**{k:getattr(r,k) for k in TestResult.__dataclass_fields__}) for r in m.run_all()]
+    except Exception as e:
+        return [TestResult("calculate/suite_error",False,0.0,0.0,f"Suite error: {e}")]
+
+def _recommendations(drawing, rag, skills, formats, calculate, compression):
     recs = []
     real_drawing = [r for r in drawing if not r.details.startswith("SKIPPED")]
     if real_drawing:
@@ -85,6 +109,12 @@ def _recommendations(drawing, rag, skills, formats):
             if "docx" in r.name: recs.append("DOCX parser broken — pip install python-docx")
             elif "pptx" in r.name: recs.append("PPTX parser broken — pip install python-pptx")
             elif "html" in r.name: recs.append("HTML parser broken — pip install beautifulsoup4")
+    for r in calculate:
+        if not r.passed and not r.details.startswith("SKIPPED"):
+            recs.append("Calculate tool failed — check math_eval.py")
+    for r in compression:
+        if not r.passed and not r.details.startswith("SKIPPED"):
+            recs.append("RAG compression failed — check retrieval.compress_context()")
     if not recs: recs.append("All tests passing — no architecture changes recommended")
     return recs
 
@@ -101,16 +131,24 @@ def _cat_stats(results):
         "issues": [r.recommendation for r in real if not r.passed and r.recommendation][:5],
     }
 
-def _build_report(drawing, rag, skills, formats, recs, elapsed_ms, agent=None):
+def _build_report(drawing, rag, skills, formats, calculate, compression, recs, elapsed_ms, agent=None):
     agent = agent or []
-    all_r = drawing+rag+skills+formats+agent
+    all_r = drawing+rag+skills+formats+calculate+compression+agent
     real = [r for r in all_r if not r.details.startswith("SKIPPED")]
     total = len(real); passed = sum(1 for r in real if r.passed)
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "total_elapsed_ms": round(elapsed_ms,1),
         "summary": {"total":total,"passed":passed,"failed":total-passed,"avg_score":round(sum(r.score for r in real)/total,3) if total else 0},
-        "categories": {"drawing":_cat_stats(drawing),"rag":_cat_stats(rag),"skills":_cat_stats(skills),"formats":_cat_stats(formats),"agent":_cat_stats(agent)},
+        "categories": {
+            "drawing":_cat_stats(drawing),
+            "rag":_cat_stats(rag),
+            "skills":_cat_stats(skills),
+            "formats":_cat_stats(formats),
+            "calculate":_cat_stats(calculate),
+            "compression":_cat_stats(compression),
+            "agent":_cat_stats(agent)
+        },
         "recommendations": recs,
         "results": [{"name":r.name,"passed":r.passed,"score":round(r.score,3),"latency_ms":round(r.latency_ms,1),"details":r.details,"recommendation":r.recommendation,"skipped":r.details.startswith("SKIPPED")} for r in all_r],
     }
@@ -165,6 +203,8 @@ async def main():
     run_s = (only=="--skills-only") or not only
     run_f = (only=="--formats-only") or not only
     run_a = (only=="--agent-only") or not only
+    run_calc = (only=="--calculate-only") or not only
+    run_comp = (only=="--compression-only") or not only
 
     print(f"\n🎓 Tablo AI — Test Suite  [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
     suite_start = time.monotonic()
@@ -173,11 +213,13 @@ async def main():
     rag = await _run_rag() if run_r else []
     skills = _run_skills() if run_s else []
     formats = _run_formats() if run_f else []
+    calculate = _run_calculate() if run_calc else []
+    compression = await _run_compression() if run_comp else []
     agent = await _run_agent() if run_a else []
 
     elapsed = (time.monotonic()-suite_start)*1000
-    recs = _recommendations(drawing, rag, skills, formats)
-    report = _build_report(drawing, rag, skills, formats, recs, elapsed, agent)
+    recs = _recommendations(drawing, rag, skills, formats, calculate, compression)
+    report = _build_report(drawing, rag, skills, formats, calculate, compression, recs, elapsed, agent)
 
     path = Path(__file__).parent / "report.json"
     with open(path,"w",encoding="utf-8") as f:

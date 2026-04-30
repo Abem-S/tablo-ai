@@ -25,12 +25,18 @@ from .models import (
     RelationType,
 )
 from . import vector_store as vs
+from config import get_env
 
 logger = logging.getLogger("tablo-rag.ingestion")
 
 _HIGH_RELEVANCE_THRESHOLD = 0.7
 _MAX_CHUNK_CHARS = 1200
 _MIN_CHUNK_CHARS = 100
+_PARSE_TIMEOUT_S = float(os.getenv("RAG_PARSE_TIMEOUT_S", "20"))
+_EMBED_TIMEOUT_S = float(os.getenv("RAG_EMBED_TIMEOUT_S", "10"))
+_EMBED_RETRIES = int(os.getenv("RAG_EMBED_RETRIES", "2"))
+_CONCEPT_TIMEOUT_S = float(os.getenv("RAG_CONCEPT_TIMEOUT_S", "8"))
+_CONCEPT_RETRIES = int(os.getenv("RAG_CONCEPT_RETRIES", "1"))
 
 
 @dataclass
@@ -73,7 +79,9 @@ class IngestionPipeline:
     @staticmethod
     def _get_genai_client():
         from google import genai
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+        if not api_key:
+            return None
         return genai.Client(api_key=api_key)
 
     # ------------------------------------------------------------------
@@ -253,17 +261,24 @@ class IngestionPipeline:
         results = await asyncio.gather(*[embed_one(c) for c in chunks])
         return list(results)
 
-    async def _embed_text_with_retry(self, text: str, task_type: str, retries: int = 2) -> list[float]:
+    async def _embed_text_with_retry(self, text: str, task_type: str, retries: int = _EMBED_RETRIES) -> list[float]:
         from google.genai import types as genai_types
         client = self._get_genai_client()
+        if client is None:
+            raise RuntimeError("Gemini API key is not configured")
+
         delay = 1.0
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                response = client.models.embed_content(
-                    model="gemini-embedding-2",
-                    contents=text,
-                    config=genai_types.EmbedContentConfig(task_type=task_type),
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.embed_content,
+                        model="gemini-embedding-2",
+                        contents=text,
+                        config=genai_types.EmbedContentConfig(task_type=task_type),
+                    ),
+                    timeout=_EMBED_TIMEOUT_S,
                 )
                 return response.embeddings[0].values
             except Exception as e:
@@ -280,18 +295,24 @@ class IngestionPipeline:
         Returns None on failure (non-fatal — text embedding is the primary signal).
         """
         try:
-            from google import genai as _genai
             from google.genai import types as genai_types
             client = self._get_genai_client()
+            if client is None:
+                logger.warning("Image embedding skipped: Gemini API key is not configured")
+                return None
             # gemini-embedding-2 accepts inline image parts
             image_part = genai_types.Part.from_bytes(
                 data=__import__("base64").b64decode(image_b64),
                 mime_type="image/png",
             )
-            response = client.models.embed_content(
-                model="gemini-embedding-2",
-                contents=image_part,
-                config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.models.embed_content,
+                    model="gemini-embedding-2",
+                    contents=image_part,
+                    config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+                ),
+                timeout=_EMBED_TIMEOUT_S,
             )
             return response.embeddings[0].values
         except Exception as e:
@@ -315,16 +336,35 @@ class IngestionPipeline:
             "Return ONLY valid JSON, no markdown.\n\n"
             f"Text:\n{sample_text}"
         )
-        try:
-            client = self._get_genai_client()
-            response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-            raw = response.text.strip() if response.text else ""
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            concept_data = json.loads(raw)
-        except Exception as e:
-            logger.warning("Concept extraction failed: %s — continuing without concepts", e)
+        client = self._get_genai_client()
+        if client is None:
+            logger.warning("Concept extraction skipped: Gemini API key is not configured")
             return []
+
+        delay = 1.0
+        for attempt in range(_CONCEPT_RETRIES + 1):
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.generate_content,
+                        model="gemini-2.5-flash",
+                        contents=prompt,
+                    ),
+                    timeout=_CONCEPT_TIMEOUT_S,
+                )
+                raw = response.text.strip() if response.text else ""
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+                concept_data = json.loads(raw)
+                break
+            except Exception as e:
+                if attempt < _CONCEPT_RETRIES:
+                    logger.warning("Concept extraction failed (attempt %d): %s — retrying", attempt + 1, e)
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                logger.warning("Concept extraction failed: %s — continuing without concepts", e)
+                return []
 
         nodes: list[ConceptNode] = []
         name_to_id: dict[str, str] = {}
@@ -357,7 +397,11 @@ class IngestionPipeline:
     async def _extract_diagrams(self, file_path: str) -> dict[int, DiagramRecipe]:
         try:
             from .diagram_extractor import DiagramExtractor
-            extractor = DiagramExtractor(self._get_genai_client())
+            client = self._get_genai_client()
+            if client is None:
+                logger.warning("Diagram extraction skipped: Gemini API key is not configured")
+                return {}
+            extractor = DiagramExtractor(client)
             return await asyncio.wait_for(extractor.extract_all(file_path), timeout=120.0)
         except asyncio.TimeoutError:
             logger.warning("Diagram extraction timed out — continuing without diagrams")
@@ -485,6 +529,7 @@ class IngestionPipeline:
 
     def _parse_by_format(self, file_path: str, ext: str) -> ParsedDocument:
         from . import parsers
+        client = self._get_genai_client()
         if ext == "pdf":
             return self.parse_pdf(file_path)
         elif ext == "txt":
@@ -492,13 +537,13 @@ class IngestionPipeline:
         elif ext == "docx":
             return parsers.parse_docx(file_path)
         elif ext == "doc":
-            return parsers.parse_doc(file_path, self._get_genai_client())
+            return parsers.parse_doc(file_path, client)
         elif ext == "pptx":
             return parsers.parse_pptx(file_path)
         elif ext == "rtf":
             return parsers.parse_rtf(file_path)
         elif ext in self._IMAGE_FORMATS:
-            return parsers.parse_image(file_path, self._get_genai_client())
+            return parsers.parse_image(file_path, client)
         elif ext == "xlsx":
             return parsers.parse_xlsx(file_path)
         elif ext == "xls":
@@ -510,7 +555,7 @@ class IngestionPipeline:
         elif ext == "html":
             return parsers.parse_html(file_path)
         elif ext == "hwp":
-            return parsers.parse_hwp(file_path, self._get_genai_client())
+            return parsers.parse_hwp(file_path, client)
         else:
             raise ValueError(f"Unsupported format '{ext}'")
 
@@ -524,7 +569,15 @@ class IngestionPipeline:
         if ext not in self._SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported format '{ext}'")
 
-        parsed = self._parse_by_format(file_path, ext)
+        try:
+            parsed = await asyncio.wait_for(
+                asyncio.to_thread(self._parse_by_format, file_path, ext),
+                timeout=_PARSE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError as e:
+            raise ValueError(f"Parsing timed out after {_PARSE_TIMEOUT_S:.0f}s") from e
+        except Exception as e:
+            raise ValueError(f"Parsing failed: {e}") from e
         if not parsed.pages:
             raise ValueError("Document contains no extractable text")
 

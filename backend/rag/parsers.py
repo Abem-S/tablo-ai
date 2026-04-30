@@ -9,11 +9,21 @@ import io
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from uuid import uuid4
 
 from .ingestion import ParsedDocument, ParsedPage
 
 logger = logging.getLogger("tablo-rag.parsers")
+_VISION_TIMEOUT_S = float(os.getenv("RAG_VISION_TIMEOUT_S", "8"))
+
+
+def _call_with_timeout(fn, timeout_s: float):
+    if timeout_s <= 0:
+        return fn()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        return future.result(timeout=timeout_s)
 
 
 def parse_docx(file_path: str) -> ParsedDocument:
@@ -124,6 +134,18 @@ def parse_rtf(file_path: str) -> ParsedDocument:
 
 def parse_image(file_path: str, genai_client) -> ParsedDocument:
     """Extract text/content from an image using Gemini vision."""
+    if genai_client is None:
+        doc_name = os.path.basename(file_path)
+        text = f"[Image: {doc_name}]"
+        pages = [ParsedPage(
+            page_number=1, section_title=None,
+            text=text, char_offset_start=0, char_offset_end=len(text),
+        )]
+        return ParsedDocument(
+            doc_id=str(uuid4()), doc_name=doc_name, format=os.path.splitext(doc_name)[1].lstrip("."),
+            pages=pages, total_chars=len(text),
+        )
+
     from google.genai import types as genai_types
 
     doc_name = os.path.basename(file_path)
@@ -135,14 +157,20 @@ def parse_image(file_path: str, genai_client) -> ParsedDocument:
     mime = mime_map.get(ext, "image/png")
 
     try:
-        response = genai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                "Extract ALL text visible in this image. Also describe any diagrams, charts, or visual structures. Return the text content faithfully.",
-            ],
-        )
+        def _run():
+            return genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                    "Extract ALL text visible in this image. Also describe any diagrams, charts, or visual structures. Return the text content faithfully.",
+                ],
+            )
+
+        response = _call_with_timeout(_run, _VISION_TIMEOUT_S)
         text = (response.text or "").strip()
+    except TimeoutError:
+        logger.warning("Image text extraction timed out after %.0fs", _VISION_TIMEOUT_S)
+        text = f"[Image: {doc_name}]"
     except Exception as e:
         logger.warning("Image text extraction failed: %s", e)
         text = f"[Image: {doc_name}]"

@@ -13,6 +13,9 @@ import asyncio
 import json
 import logging
 import os
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -25,17 +28,80 @@ load_dotenv()
 
 from rag.knowledge_graph import KnowledgeGraph
 from rag.ingestion import IngestionPipeline
-from rag.retrieval import RetrievalPipeline
+from rag.retrieval import RetrievalPipeline, compress_context
 from rag.orchestrator import RAGOrchestrator
 from learner_memory import load_profile, save_profile, apply_update, format_profile_for_prompt
 from skills_loader import build_system_prompt
+from config import get_env
+from math_eval import evaluate_expression, MathEvaluationError
+from observability import (
+    AGENT_TOOL_CALLS_TOTAL,
+    AGENT_TOOL_ERRORS_TOTAL,
+    AGENT_TOOL_LATENCY_SECONDS,
+    AGENT_UP,
+    init_tracing,
+    start_metrics_server,
+)
 
 # The livekit-plugins-google reads GOOGLE_API_KEY from env.
-# We alias GEMINI_API_KEY -> GOOGLE_API_KEY so both names work.
-if not os.getenv("GOOGLE_API_KEY") and os.getenv("GEMINI_API_KEY"):
-    os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+# We alias GEMINI_API_KEY -> GOOGLE_API_KEY so both names work, including secrets files.
+google_key = get_env("GOOGLE_API_KEY")
+if google_key:
+    os.environ["GOOGLE_API_KEY"] = google_key
+else:
+    gemini_key = get_env("GEMINI_API_KEY")
+    if gemini_key:
+        os.environ["GOOGLE_API_KEY"] = gemini_key
 
 logger = logging.getLogger("tablo-agent")
+tracer = init_tracing("tablo-agent")
+
+
+@dataclass
+class AgentHealthState:
+    status: str = "starting"
+    room: str | None = None
+    last_event: str = ""
+    updated_at: float = 0.0
+
+    def update(self, status: str, room: str | None = None, event: str | None = None) -> None:
+        self.status = status
+        if room is not None:
+            self.room = room
+        if event is not None:
+            self.last_event = event
+        self.updated_at = time.time()
+
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "room": self.room or "",
+            "last_event": self.last_event,
+            "updated_at": self.updated_at,
+        }
+
+
+_agent_health = AgentHealthState()
+AGENT_UP.set(0)
+
+
+@contextmanager
+def _observe_tool(tool_name: str):
+    AGENT_TOOL_CALLS_TOTAL.labels(tool=tool_name).inc()
+    start = time.monotonic()
+    with tracer.start_as_current_span(f"tool.{tool_name}") as span:
+        try:
+            yield span
+        except Exception as e:
+            AGENT_TOOL_ERRORS_TOTAL.labels(tool=tool_name).inc()
+            try:
+                span.record_exception(e)
+            except Exception:
+                pass
+            raise
+        finally:
+            duration = time.monotonic() - start
+            AGENT_TOOL_LATENCY_SECONDS.labels(tool=tool_name).observe(duration)
 
 
 class TabloAgent(Agent):
@@ -119,31 +185,32 @@ class TabloAgent(Agent):
 
         See drawing_commands skill for full reference.
         """
-        try:
-            command = json.loads(command_json)
-            if "v" not in command:
-                command["v"] = 1
-            if "id" not in command:
-                command["id"] = str(uuid4())
-            if command.get("op") == "create_svg" and isinstance(command.get("svg"), str):
-                command["svg"] = command["svg"].replace('\\"', "'")
+        with _observe_tool("execute_command"):
+            try:
+                command = json.loads(command_json)
+                if "v" not in command:
+                    command["v"] = 1
+                if "id" not in command:
+                    command["id"] = str(uuid4())
+                if command.get("op") == "create_svg" and isinstance(command.get("svg"), str):
+                    command["svg"] = command["svg"].replace('\"', "'")
 
-            logger.info("Board command: %s", command.get("op"))
-            await self._publish_board_command(command)
+                logger.info("Board command: %s", command.get("op"))
+                await self._publish_board_command(command)
 
-            if command.get("op") == "get_board_state":
-                self._pending_board_response = asyncio.get_running_loop().create_future()
-                try:
-                    result = await asyncio.wait_for(self._pending_board_response, timeout=3.0)
-                    self._pending_board_response = None
-                    return f"board state: {result}"
-                except asyncio.TimeoutError:
-                    self._pending_board_response = None
-                    return "board state: timeout — board may be empty"
+                if command.get("op") == "get_board_state":
+                    self._pending_board_response = asyncio.get_running_loop().create_future()
+                    try:
+                        result = await asyncio.wait_for(self._pending_board_response, timeout=3.0)
+                        self._pending_board_response = None
+                        return f"board state: {result}"
+                    except asyncio.TimeoutError:
+                        self._pending_board_response = None
+                        return "board state: timeout — board may be empty"
 
-            return f"command executed: {command.get('op', 'unknown')}"
-        except json.JSONDecodeError as e:
-            return f"Error: Invalid JSON — {e}"
+                return f"command executed: {command.get('op', 'unknown')}"
+            except json.JSONDecodeError as e:
+                return f"Error: Invalid JSON — {e}"
 
     @function_tool()
     async def get_board_image(self, context: RunContext) -> str:
@@ -161,45 +228,48 @@ class TabloAgent(Agent):
 
         Returns a description of what you can see on the board.
         """
-        if not self._latest_board_snapshot:
-            return "No board snapshot available yet. The board may be empty."
+        with _observe_tool("get_board_image"):
+            if not self._latest_board_snapshot:
+                return "No board snapshot available yet. The board may be empty."
 
-        try:
-            from google import genai as _genai
-            from google.genai import types as _types
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-            client = _genai.Client(api_key=api_key)
+            try:
+                from google import genai as _genai
+                from google.genai import types as _types
+                api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+                if not api_key:
+                    return "Board snapshot available but Gemini API is not configured."
+                client = _genai.Client(api_key=api_key)
 
-            import base64 as _b64
-            png_bytes = _b64.b64decode(self._latest_board_snapshot)
+                import base64 as _b64
+                png_bytes = _b64.b64decode(self._latest_board_snapshot)
 
-            # Use gemini-2.5-flash to describe what's on the board, with fallback
-            description = ""
-            for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
-                try:
-                    response = client.models.generate_content(
-                        model=model,
-                        contents=[
-                            _types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
-                            "Describe what is written or drawn on this whiteboard. "
-                            "Be specific about text content, equations, diagrams, shapes, and their positions. "
-                            "If there is handwritten text, transcribe it exactly. "
-                            "Keep the description concise (2-3 sentences max).",
-                        ],
-                    )
-                    description = (response.text or "").strip()
-                    if description:
-                        break
-                except Exception as e:
-                    logger.warning("get_board_image failed with %s: %s", model, e)
-            if not description:
-                return "Board appears to be empty or content is unclear."
-            logger.info("Board image described: %s", description[:100])
-            return f"Current board shows: {description}"
-        except Exception as e:
-            logger.warning("get_board_image failed: %s", e)
-            # Fallback: return that we have a snapshot but couldn't describe it
-            return f"Board snapshot available ({len(self._latest_board_snapshot)} chars) but description failed: {e}"
+                # Use gemini-2.5-flash to describe what's on the board, with fallback
+                description = ""
+                for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+                    try:
+                        response = client.models.generate_content(
+                            model=model,
+                            contents=[
+                                _types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
+                                "Describe what is written or drawn on this whiteboard. "
+                                "Be specific about text content, equations, diagrams, shapes, and their positions. "
+                                "If there is handwritten text, transcribe it exactly. "
+                                "Keep the description concise (2-3 sentences max).",
+                            ],
+                        )
+                        description = (response.text or "").strip()
+                        if description:
+                            break
+                    except Exception as e:
+                        logger.warning("get_board_image failed with %s: %s", model, e)
+                if not description:
+                    return "Board appears to be empty or content is unclear."
+                logger.info("Board image described: %s", description[:100])
+                return f"Current board shows: {description}"
+            except Exception as e:
+                logger.warning("get_board_image failed: %s", e)
+                # Fallback: return that we have a snapshot but couldn't describe it
+                return f"Board snapshot available ({len(self._latest_board_snapshot)} chars) but description failed: {e}"
 
     @function_tool()
     async def search_documents(self, context: RunContext, query: str) -> str:
@@ -220,83 +290,53 @@ class TabloAgent(Agent):
             Relevant content from the learner's uploaded documents, including page
             numbers and any diagrams available to draw.
         """
-        logger.info("search_documents called with query: %s", query[:100])
-        try:
-            if self._retrieval is None:
-                logger.warning("search_documents: retrieval pipeline is None")
-                return "No documents have been uploaded yet."
-
-            # Prepend learner context if they pointed to a specific passage
-            if self._learner_context:
-                lc = self._learner_context
-                query = (
-                    f"[Learner is pointing to: \"{lc.get('text', '')[:200]}\" "
-                    f"from {lc.get('doc_name', '')} p.{lc.get('page_number', '?')}] {query}"
-                )
-                self._learner_context = None
-
-            result = await self._retrieval.retrieve(
-                query=query,
-                turn_id=str(uuid4()),
-                top_k=4,
-                threshold=0.1,  # low threshold — Qdrant cosine scores differ from ChromaDB
-            )
-
-            logger.info("search_documents: retrieved %d chunks, is_general_knowledge=%s",
-                        len(result.context.sources), result.context.is_general_knowledge)
-
-            if result.context.is_general_knowledge or not result.context.context_text:
-                return "No relevant passages found in uploaded documents for this query."
-
-            # Publish sources to frontend so viewer navigates to the right page
-            if self._rag_orchestrator is not None:
-                asyncio.create_task(
-                    self._rag_orchestrator.publish_sources(
-                        result.context.sources,
-                        turn_id=str(uuid4()),
-                        is_general_knowledge=False,
-                    )
-                )
-
-            compressed = await self._compress_context(query, result.context)
-            logger.info("search_documents returning %d chars", len(compressed))
-            return compressed
-        except Exception as e:
-            logger.error("search_documents failed: %s", e, exc_info=True)
-            return f"Document search failed: {e}"
-
-    async def _compress_context(self, query: str, context) -> str:
-        """Compress retrieved chunks to ≤500 chars to prevent Gemini Live 1008 disconnects."""
-        diagram_hints = ""
-        if context.diagram_recipes:
-            hints = [f"p.{r.page_number}: {r.description}" for r in context.diagram_recipes]
-            diagram_hints = "\nDiagrams available (call draw_diagram): " + "; ".join(hints)
-
-        prompt = (
-            f"The learner asked: \"{query}\"\n\n"
-            f"Retrieved passages:\n{context.context_text[:2000]}\n\n"
-            "Write a concise 3-4 sentence answer covering key facts. "
-            "Include document name and page numbers. No bullet points. Return ONLY the answer."
-        )
-
-        for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+        with _observe_tool("search_documents"):
+            logger.info("search_documents called with query: %s", query[:100])
             try:
-                from google import genai as _genai
-                api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-                client = _genai.Client(api_key=api_key)
-                response = client.models.generate_content(model=model, contents=prompt)
-                summary = (response.text or "").strip()
-                if summary:
-                    if len(summary) > 500:
-                        truncated = summary[:500]
-                        last_period = max(truncated.rfind(". "), truncated.rfind(".\n"))
-                        summary = truncated[:last_period + 1] if last_period > 200 else truncated
-                    return summary + diagram_hints
-            except Exception as e:
-                logger.warning("Context compression failed with %s: %s — trying next model", model, e)
+                if self._retrieval is None:
+                    logger.warning("search_documents: retrieval pipeline is None")
+                    return "No documents have been uploaded yet."
 
-        # Final fallback: truncate raw text
-        return context.context_text[:300] + diagram_hints
+                # Prepend learner context if they pointed to a specific passage
+                if self._learner_context:
+                    lc = self._learner_context
+                    query = (
+                        f"[Learner is pointing to: \"{lc.get('text', '')[:200]}\" "
+                        f"from {lc.get('doc_name', '')} p.{lc.get('page_number', '?')}] {query}"
+                    )
+                    self._learner_context = None
+
+                result = await self._retrieval.retrieve(
+                    query=query,
+                    turn_id=str(uuid4()),
+                    top_k=4,
+                    threshold=0.1,  # low threshold — Qdrant cosine scores differ from ChromaDB
+                )
+
+                logger.info("search_documents: retrieved %d chunks, is_general_knowledge=%s",
+                            len(result.context.sources), result.context.is_general_knowledge)
+
+                if result.context.is_general_knowledge or not result.context.context_text:
+                    return "No relevant passages found in uploaded documents for this query."
+
+                # Publish sources to frontend so viewer navigates to the right page
+                if self._rag_orchestrator is not None:
+                    asyncio.create_task(
+                        self._rag_orchestrator.publish_sources(
+                            result.context.sources,
+                            turn_id=str(uuid4()),
+                            is_general_knowledge=False,
+                        )
+                    )
+
+                compressed = await compress_context(query, result.context)
+                logger.info("search_documents returning %d chars", len(compressed))
+                return compressed
+            except Exception as e:
+                logger.error("search_documents failed: %s", e, exc_info=True)
+                return f"Document search failed: {e}"
+
+    # _compress_context moved to rag.retrieval.compress_context
 
     @function_tool()
     async def draw_diagram(self, context: RunContext, page_number: int) -> str:
@@ -308,69 +348,72 @@ class TabloAgent(Agent):
         Args:
             page_number: Page number of the diagram (from search_documents result).
         """
-        try:
-            if self._collection_name is None:
-                return "No documents available."
+        with _observe_tool("draw_diagram"):
+            try:
+                if self._collection_name is None:
+                    return "No documents available."
 
-            from rag.vector_store import get_points_by_doc_id, _get_client, collection_name
-            client = _get_client()
-            col = self._collection_name
+                from rag.vector_store import get_points_by_doc_id, _get_client, collection_name
+                client = _get_client()
+                col = self._collection_name
 
-            # Search all points for one with matching page_number and a diagram_recipe
-            import json as _json
-            # Scroll through collection to find diagram for this page
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-            results, _ = client.scroll(
-                collection_name=col,
-                scroll_filter=Filter(must=[FieldCondition(key="page_number", match=MatchValue(value=page_number))]),
-                limit=10,
-                with_payload=True,
-                with_vectors=False,
-            )
-            recipe_raw = ""
-            for pt in results:
-                r = pt.payload.get("diagram_recipe", "")
-                if r:
-                    recipe_raw = r
-                    break
+                # Search all points for one with matching page_number and a diagram_recipe
+                import json as _json
+                # Scroll through collection to find diagram for this page
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                results, _ = client.scroll(
+                    collection_name=col,
+                    scroll_filter=Filter(must=[FieldCondition(key="page_number", match=MatchValue(value=page_number))]),
+                    limit=10,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                recipe_raw = ""
+                for pt in results:
+                    r = pt.payload.get("diagram_recipe", "")
+                    if r:
+                        recipe_raw = r
+                        break
 
-            if not recipe_raw:
-                return f"No diagram found for page {page_number}."
+                if not recipe_raw:
+                    return f"No diagram found for page {page_number}."
 
-            recipe_data = _json.loads(recipe_raw)
-            description = recipe_data.get("description", "")
-            image_b64 = recipe_data.get("image_b64", "")
-            if not description and not image_b64:
-                return f"Diagram data missing for page {page_number}."
+                recipe_data = _json.loads(recipe_raw)
+                description = recipe_data.get("description", "")
+                image_b64 = recipe_data.get("image_b64", "")
+                if not description and not image_b64:
+                    return f"Diagram data missing for page {page_number}."
 
-            from rag.diagram_extractor import DiagramExtractor
-            from google import genai as _genai
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-            client = _genai.Client(api_key=api_key)
-            extractor = DiagramExtractor(client)
-            commands = await extractor.generate_commands(description, image_b64=image_b64)
+                from rag.diagram_extractor import DiagramExtractor
+                from google import genai as _genai
+                api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+                if not api_key:
+                    return "Gemini API is not configured for diagram generation."
+                client = _genai.Client(api_key=api_key)
+                extractor = DiagramExtractor(client)
+                commands = await extractor.generate_commands(description, image_b64=image_b64)
 
-            if not commands:
-                return f"Could not generate drawing commands for page {page_number}."
+                if not commands:
+                    return f"Could not generate drawing commands for page {page_number}."
 
-            published = 0
-            for cmd in commands:
-                try:
-                    if "v" not in cmd:
-                        cmd["v"] = 1
-                    if "id" not in cmd:
-                        cmd["id"] = str(uuid4())
-                    await self._publish_board_command(cmd)
-                    published += 1
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    logger.warning("Failed to publish diagram command: %s", e)
+                published = 0
+                for cmd in commands:
+                    try:
+                        if "v" not in cmd:
+                            cmd["v"] = 1
+                        if "id" not in cmd:
+                            cmd["id"] = str(uuid4())
+                        await self._publish_board_command(cmd)
+                        published += 1
+                        await asyncio.sleep(0.05)
+                    except Exception as e:
+                        logger.warning("Failed to publish diagram command: %s", e)
 
-            logger.info("Drew diagram from page %d: %d commands", page_number, published)
-            return f"Drew diagram from page {page_number} ({published} shapes)."
-        except Exception as e:
-            logger.error("draw_diagram failed for page %d: %s", page_number, e)
-            return f"Failed to draw diagram: {e}"
+                logger.info("Drew diagram from page %d: %d commands", page_number, published)
+                return f"Drew diagram from page {page_number} ({published} shapes)."
+            except Exception as e:
+                logger.error("draw_diagram failed for page %d: %s", page_number, e)
+                return f"Failed to draw diagram: {e}"
 
     @function_tool()
     async def calculate(self, context: RunContext, expression: str) -> str:
@@ -381,24 +424,12 @@ class TabloAgent(Agent):
         Args:
             expression: Math expression. Examples: "347 * 28", "sqrt(144)", "sin(pi/6)", "2^10"
         """
-        try:
-            import math as _math
-            expr = expression.strip().replace("^", "**").replace("pi", str(_math.pi))
-            safe_env = {
-                "sqrt": _math.sqrt, "sin": _math.sin, "cos": _math.cos,
-                "tan": _math.tan, "log": _math.log, "log10": _math.log10,
-                "log2": _math.log2, "exp": _math.exp, "abs": abs,
-                "floor": _math.floor, "ceil": _math.ceil, "round": round,
-                "factorial": _math.factorial, "gcd": _math.gcd,
-                "pow": pow, "pi": _math.pi, "e": _math.e,
-                "asin": _math.asin, "acos": _math.acos, "atan": _math.atan,
-                "atan2": _math.atan2, "sinh": _math.sinh, "cosh": _math.cosh,
-                "tanh": _math.tanh, "degrees": _math.degrees, "radians": _math.radians,
-            }
-            result = eval(expr, {"__builtins__": {}}, safe_env)  # noqa: S307
-            return f"Result: {result}"
-        except Exception as e:
-            return f"Could not evaluate '{expression}': {e}"
+        with _observe_tool("calculate"):
+            try:
+                result = evaluate_expression(expression)
+                return f"Result: {result}"
+            except MathEvaluationError as e:
+                return f"Could not evaluate '{expression}': {e}"
 
     @function_tool()
     async def update_learner_profile(self, context: RunContext, update_json: str) -> str:
@@ -428,24 +459,33 @@ class TabloAgent(Agent):
         Call this at natural breakpoints: when a topic is mastered, when a struggle is identified,
         or at the end of a session to write the summary.
         """
-        try:
-            update = json.loads(update_json)
-            self._learner_profile = apply_update(self._learner_profile, update)
-            save_profile(self._learner_profile)
-            logger.info("Updated learner profile for %s: %s", self._learner_id, list(update.keys()))
-            return f"Learner profile updated: {list(update.keys())}"
-        except json.JSONDecodeError as e:
-            return f"Error: Invalid JSON — {e}"
-        except Exception as e:
-            logger.error("update_learner_profile failed: %s", e)
-            return f"Failed to update profile: {e}"
+        with _observe_tool("update_learner_profile"):
+            try:
+                update = json.loads(update_json)
+                self._learner_profile = apply_update(self._learner_profile, update)
+                save_profile(self._learner_profile)
+                logger.info("Updated learner profile for %s: %s", self._learner_id, list(update.keys()))
+                return f"Learner profile updated: {list(update.keys())}"
+            except json.JSONDecodeError as e:
+                return f"Error: Invalid JSON — {e}"
+            except Exception as e:
+                logger.error("update_learner_profile failed: %s", e)
+                return f"Failed to update profile: {e}"
 
 
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 
 async def entrypoint(ctx: JobContext):
+    _agent_health.update("starting", room=ctx.room.name, event="job_received")
+    metrics_enabled = os.getenv("AGENT_METRICS_ENABLED", "true").lower() == "true"
+    if metrics_enabled:
+        port = int(os.getenv("AGENT_METRICS_PORT", "9091"))
+        start_metrics_server(port, health_fn=_agent_health.as_dict)
+
     logger.info("Connecting to room: %s", ctx.room.name)
     await ctx.connect()
+    _agent_health.update("connected", event="room_connected")
+    AGENT_UP.set(1)
     logger.info("Connected. Starting Gemini Live session...")
 
     # Derive learner_id from room name (format: tablo-{session_id}-{hex})
@@ -547,10 +587,13 @@ async def entrypoint(ctx: JobContext):
     @session.on("agent_speech_started")
     def on_agent_speech_started():
         logger.debug("Agent started speaking")
+        _agent_health.update("speaking", event="agent_speech_started")
 
     @session.on("error")
     def on_error(err):
         logger.error("Session error: %s", err)
+        _agent_health.update("error", event="session_error")
+        AGENT_UP.set(0)
 
     @ctx.room.on("track_subscribed")
     def on_track_subscribed(track, publication, participant):

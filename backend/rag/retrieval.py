@@ -17,6 +17,13 @@ from .models import (
     SourceAttribution,
 )
 from . import vector_store as vs
+from config import get_env
+from observability import (
+    RAG_RETRIEVAL_ERRORS_TOTAL,
+    RAG_RETRIEVAL_LATENCY_SECONDS,
+    RAG_COMPRESSION_LATENCY_SECONDS,
+    RAG_COMPRESSION_TRUNCATIONS_TOTAL,
+)
 
 logger = logging.getLogger("tablo-rag.retrieval")
 
@@ -24,6 +31,98 @@ _HIGH_RELEVANCE_THRESHOLD = 0.7
 _DEFAULT_THRESHOLD = 0.3
 _RETRIEVAL_TIMEOUT_S = 5.0
 _RRF_K = 60
+_EMBED_TIMEOUT_S = float(os.getenv("RAG_EMBED_TIMEOUT_S", "8"))
+_EMBED_RETRIES = int(os.getenv("RAG_EMBED_RETRIES", "2"))
+_COMPRESS_TIMEOUT_S = float(os.getenv("RAG_COMPRESS_TIMEOUT_S", "6"))
+_COMPRESS_RETRIES = int(os.getenv("RAG_COMPRESS_RETRIES", "1"))
+_COMPRESS_MAX_CHARS = int(os.getenv("RAG_COMPRESS_MAX_CHARS", "500"))
+
+
+def _get_genai_client():
+    from google import genai
+    api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    return genai.Client(api_key=api_key)
+
+
+def _build_diagram_hints(context: RetrievalContext) -> str:
+    if not context.diagram_recipes:
+        return ""
+    hints = [f"p.{r.page_number}: {r.description}" for r in context.diagram_recipes]
+    return "\nDiagrams available (call draw_diagram): " + "; ".join(hints)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_period = max(truncated.rfind(". "), truncated.rfind(".\n"))
+    if last_period > max_chars * 0.5:
+        return truncated[:last_period + 1]
+    return truncated
+
+
+async def compress_context(
+    query: str,
+    context: RetrievalContext,
+    max_chars: int = _COMPRESS_MAX_CHARS,
+    allow_llm: bool = True,
+) -> str:
+    """Compress retrieved chunks to a bounded length for Gemini Live stability."""
+    start = time.monotonic()
+    diagram_hints = _build_diagram_hints(context)
+    summary = ""
+
+    if allow_llm:
+        client = _get_genai_client()
+        if client is not None:
+            prompt = (
+                f"The learner asked: \"{query}\"\n\n"
+                f"Retrieved passages:\n{context.context_text[:2000]}\n\n"
+                "Write a concise 3-4 sentence answer covering key facts. "
+                "Include document name and page numbers. No bullet points. Return ONLY the answer."
+            )
+            delay = 1.0
+            for attempt in range(_COMPRESS_RETRIES + 1):
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            client.models.generate_content,
+                            model="gemini-2.5-flash",
+                            contents=prompt,
+                        ),
+                        timeout=_COMPRESS_TIMEOUT_S,
+                    )
+                    summary = (response.text or "").strip()
+                    if summary:
+                        break
+                except Exception as e:
+                    if attempt < _COMPRESS_RETRIES:
+                        logger.warning("Context compression failed (attempt %d): %s", attempt + 1, e)
+                        await asyncio.sleep(delay)
+                        delay *= 2
+                    else:
+                        logger.warning("Context compression failed after retries: %s", e)
+
+    if not summary:
+        summary = context.context_text[:max(0, max_chars - len(diagram_hints))]
+
+    combined = summary
+    if diagram_hints:
+        remaining = max_chars - len(diagram_hints)
+        if remaining < 50:
+            diagram_hints = _truncate_text(diagram_hints, max_chars // 2)
+            remaining = max_chars - len(diagram_hints)
+        summary = _truncate_text(summary, max(0, remaining))
+        combined = summary + diagram_hints
+
+    if len(combined) > max_chars:
+        RAG_COMPRESSION_TRUNCATIONS_TOTAL.inc()
+        combined = _truncate_text(combined, max_chars)
+
+    RAG_COMPRESSION_LATENCY_SECONDS.observe(time.monotonic() - start)
+    return combined
 
 
 class RetrievalPipeline:
@@ -73,14 +172,35 @@ class RetrievalPipeline:
     async def _embed_query(self, text: str) -> list[float]:
         from google import genai
         from google.genai import types as genai_types
-        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+        api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("Gemini API key is not configured")
+
         client = genai.Client(api_key=api_key)
-        response = client.models.embed_content(
-            model="gemini-embedding-2",
-            contents=text,
-            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
-        )
-        return response.embeddings[0].values
+        delay = 0.5
+        last_error: Exception | None = None
+
+        for attempt in range(_EMBED_RETRIES + 1):
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.embed_content,
+                        model="gemini-embedding-2",
+                        contents=text,
+                        config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+                    ),
+                    timeout=_EMBED_TIMEOUT_S,
+                )
+                return response.embeddings[0].values
+            except Exception as e:
+                last_error = e
+                if attempt < _EMBED_RETRIES:
+                    logger.warning("Query embedding failed (attempt %d): %s", attempt + 1, e)
+                    await asyncio.sleep(delay)
+                    delay *= 2
+
+        raise RuntimeError(f"Query embedding failed after retries: {last_error}")
 
     @staticmethod
     def _payload_to_chunk(p: dict) -> Chunk:
@@ -252,20 +372,27 @@ class RetrievalPipeline:
         threshold: float = _DEFAULT_THRESHOLD,
     ) -> RetrievalResult:
         start = time.monotonic()
+        try:
+            vector_results, graph_results = await asyncio.gather(
+                self.vector_search(query, top_k=top_k * 2),
+                asyncio.to_thread(self.graph_search, query, top_k=top_k),
+            )
 
-        vector_results, graph_results = await asyncio.gather(
-            self.vector_search(query, top_k=top_k * 2),
-            asyncio.to_thread(self.graph_search, query, top_k=top_k),
-        )
+            vector_filtered = [sc for sc in vector_results if sc.score >= threshold]
+            graph_filtered = [sc for sc in graph_results if sc.score >= threshold]
 
-        vector_filtered = [sc for sc in vector_results if sc.score >= threshold]
-        graph_filtered = [sc for sc in graph_results if sc.score >= threshold]
+            fused = self.rerank_rrf(vector_filtered, graph_filtered)
+            top = fused[:top_k]
 
-        fused = self.rerank_rrf(vector_filtered, graph_filtered)
-        top = fused[:top_k]
+            context = self.assemble_context(top, turn_id)
+            elapsed_ms = (time.monotonic() - start) * 1000
 
-        context = self.assemble_context(top, turn_id)
-        elapsed_ms = (time.monotonic() - start) * 1000
-
-        logger.info("Retrieval: %d chunks (threshold=%.2f, %.0fms)", len(top), threshold, elapsed_ms)
-        return RetrievalResult(context=context, elapsed_ms=elapsed_ms)
+            logger.info("Retrieval: %d chunks (threshold=%.2f, %.0fms)", len(top), threshold, elapsed_ms)
+            RAG_RETRIEVAL_LATENCY_SECONDS.observe(elapsed_ms / 1000)
+            return RetrievalResult(context=context, elapsed_ms=elapsed_ms)
+        except Exception as e:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            RAG_RETRIEVAL_ERRORS_TOTAL.inc()
+            logger.error("Retrieval failed: %s", e)
+            context = RetrievalContext(turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True)
+            return RetrievalResult(context=context, elapsed_ms=elapsed_ms)

@@ -4,6 +4,12 @@
 # LiveKit self-hosted config (contains credentials)
 livekit.yaml
 
+# Secrets directory — README is committed, actual secret files are not
+secrets/livekit_api_key
+secrets/livekit_api_secret
+secrets/google_api_key
+secrets/qdrant_api_key
+
 # Backend runtime data (uploads, vector store, knowledge graph)
 backend/data/uploads/
 backend/data/chromadb/

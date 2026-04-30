@@ -108,9 +108,42 @@ Single `execute_command(command_json)` tool. Full command set:
 ### Infrastructure
 
 - `docker-compose.yml` — Qdrant + backend + agent + optional self-hosted LiveKit
-- `backend/Dockerfile`
+- `backend/Dockerfile` — development image
+- `backend/Dockerfile.prod` — production image (slim, non-root user)
 - `livekit.yaml.example` — template for self-hosted LiveKit config
 - Self-hosted LiveKit: `docker compose --profile livekit up -d`, set `LIVEKIT_URL=ws://localhost:7880`
+
+### Safe Math Evaluator
+
+`backend/math_eval.py` — replaces unsafe `eval()` with `asteval`:
+- `evaluate_expression(expr)` — sandboxed, only math functions exposed
+- `MathEvaluationError` on invalid/unsafe input
+- 200-char cap, rejects `__import__`, `exec`, `eval`
+
+### Secrets & Config
+
+`backend/config.py` — `get_env(name)` reads in priority order:
+1. `{NAME}_FILE` (Docker/K8s secrets)
+2. Environment variable
+3. HashiCorp Vault (`VAULT_ADDR` + `VAULT_TOKEN`)
+
+### Observability
+
+`backend/observability.py` — Prometheus metrics + OpenTelemetry tracing:
+- Agent worker: `/health` + `/metrics` on port 9091
+- FastAPI: `GET /metrics` endpoint
+- Per-tool call/error/latency counters
+- RAG retrieval + compression latency histograms
+- `tablo_agent_up` gauge
+- `observability/` — Prometheus, Grafana, Loki, Promtail, alerting rules
+
+### CI/CD
+
+`.github/workflows/ci.yml` — runs `python tests/run_all.py --no-drawing` on every push.
+
+### Qdrant Backup Scripts
+
+`backend/scripts/` — `qdrant_snapshot.py`, `qdrant_restore.py`, `qdrant_migrate.py`
 
 ---
 
@@ -120,10 +153,12 @@ Single `execute_command(command_json)` tool. Full command set:
 backend/tests/
   test_skills.py          — 6 tests, no external deps (100% passing)
   test_formats.py         — 6 tests, no external deps (100% passing)
-  test_rag.py             — 6 tests, requires Qdrant + Gemini API (100% passing)
+  test_calculate.py       — 10 tests, no external deps (100% passing) — safe eval, edge cases, injection rejection
+  test_compression.py     — 5 tests, no external deps (100% passing) — max_chars, truncation, diagram hints
+  test_rag.py             — 6 tests, requires Qdrant + Gemini API (100% passing when API stable)
   test_drawing.py         — 20 tests, requires Gemini API (95% passing)
   test_agent_behavior.py  — 4 tests, requires Gemini API + Qdrant
-    - tool_call_rate: 10/10 (100%) — search_documents called on every subject question
+    - tool_call_rate: 9-10/10 (90-100%) — search_documents called on every subject question
     - board_image_description: 100%
     - socratic_quality: 80% (questions asked every turn, no full answers given immediately)
     - concurrent_qdrant: known blocker — requires auth for isolation
@@ -132,9 +167,10 @@ backend/tests/
 
 Run:
 ```bash
-python tests/run_all.py --no-drawing   # fast, ~35s
+python tests/run_all.py --no-drawing   # fast, ~35s, no Gemini API needed
 python tests/run_all.py                # full suite
-python tests/test_agent_behavior.py    # agent behavior only
+python tests/test_calculate.py         # safe math eval only
+python tests/test_compression.py       # RAG compression only
 ```
 
 ---
@@ -179,22 +215,31 @@ npm run dev
 
 | File | Purpose |
 |------|---------|
-| `backend/agent.py` | TabloAgent, all tools, board snapshot handler, session wiring |
-| `backend/main.py` | FastAPI routes, document management, learner profile endpoints |
+| `backend/agent.py` | TabloAgent, all tools, board snapshot handler, session wiring, `_observe_tool` metrics |
+| `backend/main.py` | FastAPI routes, document management, learner profile endpoints, `/metrics` endpoint |
+| `backend/math_eval.py` | Safe math expression evaluator (asteval-based, replaces eval) |
+| `backend/config.py` | `get_env()` — reads from env, `*_FILE`, or Vault |
+| `backend/observability.py` | Prometheus metrics, OpenTelemetry tracing, agent health server |
 | `backend/learner_memory.py` | Load/save/merge learner profiles |
 | `backend/skills_loader.py` | Load skill files, assemble dynamic system prompt |
 | `backend/skills/` | Modular agent behavior markdown files |
 | `backend/rag/vector_store.py` | Qdrant client wrapper with payload indexes |
-| `backend/rag/ingestion.py` | Two-phase async ingestion, concurrent embeddings |
-| `backend/rag/retrieval.py` | Hybrid vector + graph retrieval with RRF |
+| `backend/rag/ingestion.py` | Two-phase async ingestion, concurrent embeddings, timeouts |
+| `backend/rag/retrieval.py` | Hybrid vector + graph retrieval, `compress_context()` centralized |
 | `backend/rag/orchestrator.py` | Warm-path RAG, source publishing, context injection safety net |
 | `backend/rag/diagram_extractor.py` | PDF page rendering, Gemini vision diagram extraction |
-| `backend/tests/` | Full automated test suite |
+| `backend/scripts/` | Qdrant snapshot/restore/migrate scripts |
+| `backend/tests/` | Full automated test suite (10 suites, 37+ tests) |
+| `backend/tests/integration/` | E2E voice test harness (manual, requires audio device) |
 | `frontend/src/components/tablo-workspace.tsx` | Main UI, BoardSnapshotPublisher, command handler |
 | `frontend/src/components/document-viewer-panel.tsx` | react-pdf viewer, AI navigation, select-to-ask |
 | `frontend/src/components/source-panel.tsx` | RAG source transparency overlay |
 | `docker-compose.yml` | Qdrant + backend + agent + optional LiveKit |
+| `backend/Dockerfile.prod` | Production Docker image |
 | `livekit.yaml.example` | Self-hosted LiveKit config template |
+| `observability/` | Prometheus, Grafana, Loki, Promtail, alerting rules |
+| `.github/workflows/ci.yml` | CI pipeline — runs tests on every push |
+| `secrets/README.md` | Documents expected secret files (actual files gitignored) |
 
 ---
 
@@ -207,6 +252,8 @@ npm run dev
 - Plugin reads `GOOGLE_API_KEY` — `GEMINI_API_KEY` is aliased automatically in `agent.py`
 - All board drawing through `execute_command` — no separate per-shape tools
 - Always use `calculate` tool for arithmetic — never let model guess
+- `calculate` uses `math_eval.evaluate_expression()` — never use raw `eval()`
+- All secrets via `config.get_env()` — never `os.getenv()` directly for credentials
 - Board vision: `BoardSnapshotPublisher` + `get_board_image` tool — do NOT restore `CanvasVideoPublisher` or `video_input=True`
 - RAG: context through `search_documents` tool only — do NOT call `update_instructions` with RAG context
 - Skills: agent behavior in `backend/skills/*.md` — do not hardcode in `agent.py`
