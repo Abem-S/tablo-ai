@@ -1,4 +1,5 @@
 """Lightweight in-memory knowledge graph with JSON persistence."""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +11,9 @@ from .models import ConceptNode, ConceptRelationship, RelationType
 
 logger = logging.getLogger("tablo-rag.kg")
 
-_DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "knowledge_graph.json")
+_DEFAULT_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "data", "knowledge_graph.json"
+)
 
 
 class KnowledgeGraph:
@@ -21,8 +24,8 @@ class KnowledgeGraph:
     """
 
     def __init__(self) -> None:
-        self._nodes: dict[str, ConceptNode] = {}          # concept_id -> ConceptNode
-        self._by_name: dict[str, str] = {}                # name (lower) -> concept_id
+        self._nodes: dict[str, ConceptNode] = {}  # concept_id -> ConceptNode
+        self._by_name: dict[str, str] = {}  # name (lower) -> concept_id
         # adjacency: source_concept_id -> list[ConceptRelationship]
         self._edges: dict[str, list[ConceptRelationship]] = defaultdict(list)
 
@@ -35,9 +38,13 @@ class KnowledgeGraph:
         self._nodes[node.concept_id] = node
         self._by_name[node.name.lower()] = node.concept_id
 
-    def add_relationship(self, source: str, target: str, rel_type: RelationType) -> None:
+    def add_relationship(
+        self, source: str, target: str, rel_type: RelationType
+    ) -> None:
         """Add a directed relationship between two concept IDs."""
-        rel = ConceptRelationship(source_concept=source, target_concept=target, rel_type=rel_type)
+        rel = ConceptRelationship(
+            source_concept=source, target_concept=target, rel_type=rel_type
+        )
         # Avoid duplicates
         existing = self._edges[source]
         for e in existing:
@@ -47,7 +54,9 @@ class KnowledgeGraph:
 
     def remove_document_concepts(self, doc_id: str) -> None:
         """Remove all nodes and edges belonging to a document."""
-        ids_to_remove = [cid for cid, node in self._nodes.items() if node.doc_id == doc_id]
+        ids_to_remove = [
+            cid for cid, node in self._nodes.items() if node.doc_id == doc_id
+        ]
         for cid in ids_to_remove:
             node = self._nodes.pop(cid)
             self._by_name.pop(node.name.lower(), None)
@@ -69,7 +78,9 @@ class KnowledgeGraph:
         cid = self._by_name.get(name.lower())
         return self._nodes.get(cid) if cid else None
 
-    def get_related(self, concept_name: str, rel_type: RelationType | None = None) -> list[ConceptNode]:
+    def get_related(
+        self, concept_name: str, rel_type: RelationType | None = None
+    ) -> list[ConceptNode]:
         """Return all concepts directly connected from concept_name, optionally filtered by rel_type."""
         node = self.query_by_name(concept_name)
         if not node:
@@ -117,7 +128,12 @@ class KnowledgeGraph:
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        logger.info("Knowledge graph saved to %s (%d nodes, %d edges)", path, len(self._nodes), sum(len(v) for v in self._edges.values()))
+        logger.info(
+            "Knowledge graph saved to %s (%d nodes, %d edges)",
+            path,
+            len(self._nodes),
+            sum(len(v) for v in self._edges.values()),
+        )
 
     def load(self, path: str = _DEFAULT_PATH) -> None:
         if not os.path.exists(path):
@@ -137,5 +153,7 @@ class KnowledgeGraph:
             )
             self.add_concept(node)
         for e in data.get("edges", []):
-            self.add_relationship(e["source_concept"], e["target_concept"], RelationType(e["rel_type"]))
+            self.add_relationship(
+                e["source_concept"], e["target_concept"], RelationType(e["rel_type"])
+            )
         logger.info("Knowledge graph loaded from %s (%d nodes)", path, len(self._nodes))

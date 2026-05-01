@@ -4,6 +4,7 @@ Skills are plain markdown files in backend/skills/.
 They are loaded once at startup and cached.
 The assembled prompt = skill sections + learner profile section.
 """
+
 from __future__ import annotations
 
 import logging

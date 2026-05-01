@@ -1,7 +1,7 @@
 """Ensure Qdrant payload indexes exist for all collections."""
+
 from __future__ import annotations
 
-import os
 import sys
 
 from rag import vector_store as vs

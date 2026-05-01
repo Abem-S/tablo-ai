@@ -1,4 +1,5 @@
 """Configuration helpers with secret manager support."""
+
 from __future__ import annotations
 
 import logging
@@ -20,7 +21,9 @@ def _load_vault_secrets() -> dict[str, str]:
     try:
         import hvac
     except ImportError:
-        logger.warning("Vault configured but hvac not installed; skipping Vault secrets")
+        logger.warning(
+            "Vault configured but hvac not installed; skipping Vault secrets"
+        )
         return {}
 
     try:
@@ -45,7 +48,9 @@ def _read_secret_file(path: str) -> str | None:
         return None
 
 
-def get_env(name: str, default: str | None = None, required: bool = False) -> str | None:
+def get_env(
+    name: str, default: str | None = None, required: bool = False
+) -> str | None:
     """Read config from env, *_FILE, or Vault (in that order)."""
     file_path = os.getenv(f"{name}_FILE")
     if file_path:

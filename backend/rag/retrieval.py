@@ -1,11 +1,11 @@
 """Hybrid retrieval pipeline: vector search (Qdrant) + knowledge graph + RRF reranking."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import time
-from uuid import uuid4
 
 from .knowledge_graph import KnowledgeGraph
 from .models import (
@@ -40,6 +40,7 @@ _COMPRESS_MAX_CHARS = int(os.getenv("RAG_COMPRESS_MAX_CHARS", "500"))
 
 def _get_genai_client():
     from google import genai
+
     api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
     if not api_key:
         return None
@@ -59,7 +60,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
     truncated = text[:max_chars]
     last_period = max(truncated.rfind(". "), truncated.rfind(".\n"))
     if last_period > max_chars * 0.5:
-        return truncated[:last_period + 1]
+        return truncated[: last_period + 1]
     return truncated
 
 
@@ -78,7 +79,7 @@ async def compress_context(
         client = _get_genai_client()
         if client is not None:
             prompt = (
-                f"The learner asked: \"{query}\"\n\n"
+                f'The learner asked: "{query}"\n\n'
                 f"Retrieved passages:\n{context.context_text[:2000]}\n\n"
                 "Write a concise 3-4 sentence answer covering key facts. "
                 "Include document name and page numbers. No bullet points. Return ONLY the answer."
@@ -99,14 +100,20 @@ async def compress_context(
                         break
                 except Exception as e:
                     if attempt < _COMPRESS_RETRIES:
-                        logger.warning("Context compression failed (attempt %d): %s", attempt + 1, e)
+                        logger.warning(
+                            "Context compression failed (attempt %d): %s",
+                            attempt + 1,
+                            e,
+                        )
                         await asyncio.sleep(delay)
                         delay *= 2
                     else:
-                        logger.warning("Context compression failed after retries: %s", e)
+                        logger.warning(
+                            "Context compression failed after retries: %s", e
+                        )
 
     if not summary:
-        summary = context.context_text[:max(0, max_chars - len(diagram_hints))]
+        summary = context.context_text[: max(0, max_chars - len(diagram_hints))]
 
     combined = summary
     if diagram_hints:
@@ -160,7 +167,9 @@ class RetrievalPipeline:
             for r in results:
                 p = r["payload"]
                 chunk = self._payload_to_chunk(p)
-                scored.append(ScoredChunk(chunk=chunk, score=r["score"], source="vector"))
+                scored.append(
+                    ScoredChunk(chunk=chunk, score=r["score"], source="vector")
+                )
             return scored
         except asyncio.TimeoutError:
             logger.warning("Vector search timed out")
@@ -188,7 +197,9 @@ class RetrievalPipeline:
                         client.models.embed_content,
                         model="gemini-embedding-2",
                         contents=text,
-                        config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),
+                        config=genai_types.EmbedContentConfig(
+                            task_type="RETRIEVAL_QUERY"
+                        ),
                     ),
                     timeout=_EMBED_TIMEOUT_S,
                 )
@@ -196,7 +207,9 @@ class RetrievalPipeline:
             except Exception as e:
                 last_error = e
                 if attempt < _EMBED_RETRIES:
-                    logger.warning("Query embedding failed (attempt %d): %s", attempt + 1, e)
+                    logger.warning(
+                        "Query embedding failed (attempt %d): %s", attempt + 1, e
+                    )
                     await asyncio.sleep(delay)
                     delay *= 2
 
@@ -209,7 +222,9 @@ class RetrievalPipeline:
             doc_id=p.get("doc_id", ""),
             doc_name=p.get("doc_name", ""),
             text=p.get("text", ""),
-            page_number=p.get("page_number") if p.get("page_number", -1) != -1 else None,
+            page_number=p.get("page_number")
+            if p.get("page_number", -1) != -1
+            else None,
             section_title=p.get("section_title") or None,
             char_offset_start=p.get("char_offset_start", 0),
             char_offset_end=p.get("char_offset_end", 0),
@@ -241,7 +256,9 @@ class RetrievalPipeline:
                         if chunk_id in matched:
                             continue
                         try:
-                            points = vs.get_points_by_doc_id(self._client, self._collection, n.doc_id)
+                            points = vs.get_points_by_doc_id(
+                                self._client, self._collection, n.doc_id
+                            )
                             for pt in points:
                                 if pt["payload"].get("chunk_id") == chunk_id:
                                     chunk = self._payload_to_chunk(pt["payload"])
@@ -283,23 +300,30 @@ class RetrievalPipeline:
 
         return [
             ScoredChunk(chunk=chunk_map[cid], score=score, source="fused")
-            for cid, score in sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+            for cid, score in sorted(
+                rrf_scores.items(), key=lambda x: x[1], reverse=True
+            )
         ]
 
     # ------------------------------------------------------------------
     # Diagram recipe collection
     # ------------------------------------------------------------------
 
-    def _collect_diagram_recipes(self, chunks: list[ScoredChunk]) -> list[DiagramRecipe]:
+    def _collect_diagram_recipes(
+        self, chunks: list[ScoredChunk]
+    ) -> list[DiagramRecipe]:
         """Extract diagram recipes from chunk payloads, deduplicated by page."""
         import json as _json
+
         seen_pages: set[int] = set()
         recipes: list[DiagramRecipe] = []
 
         # Fetch payloads for top chunks to get diagram_recipe field
         for sc in chunks:
             try:
-                points = vs.get_points_by_doc_id(self._client, self._collection, sc.chunk.doc_id)
+                points = vs.get_points_by_doc_id(
+                    self._client, self._collection, sc.chunk.doc_id
+                )
                 for pt in points:
                     p = pt["payload"]
                     if p.get("chunk_id") != sc.chunk.chunk_id:
@@ -311,11 +335,13 @@ class RetrievalPipeline:
                     page = data.get("page_number")
                     if page and page not in seen_pages:
                         seen_pages.add(page)
-                        recipes.append(DiagramRecipe(
-                            page_number=page,
-                            description=data.get("description", ""),
-                            image_b64=data.get("image_b64", ""),
-                        ))
+                        recipes.append(
+                            DiagramRecipe(
+                                page_number=page,
+                                description=data.get("description", ""),
+                                image_b64=data.get("image_b64", ""),
+                            )
+                        )
                     break
             except Exception as e:
                 logger.warning("Failed to collect diagram recipe: %s", e)
@@ -326,16 +352,22 @@ class RetrievalPipeline:
     # Context assembly
     # ------------------------------------------------------------------
 
-    def assemble_context(self, chunks: list[ScoredChunk], turn_id: str) -> RetrievalContext:
+    def assemble_context(
+        self, chunks: list[ScoredChunk], turn_id: str
+    ) -> RetrievalContext:
         if not chunks:
-            return RetrievalContext(turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True)
+            return RetrievalContext(
+                turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True
+            )
 
         context_parts: list[str] = []
         sources: list[SourceAttribution] = []
 
         for sc in chunks:
             chunk = sc.chunk
-            relevance = "high" if sc.score > _HIGH_RELEVANCE_THRESHOLD else "supplementary"
+            relevance = (
+                "high" if sc.score > _HIGH_RELEVANCE_THRESHOLD else "supplementary"
+            )
             source = SourceAttribution(
                 chunk_id=chunk.chunk_id,
                 document_name=chunk.doc_name,
@@ -348,7 +380,9 @@ class RetrievalPipeline:
             sources.append(source)
             location = f"p.{chunk.page_number}" if chunk.page_number else "§"
             section = f" [{chunk.section_title}]" if chunk.section_title else ""
-            context_parts.append(f"[Source: {chunk.doc_name}{section}, {location}]\n{chunk.text}")
+            context_parts.append(
+                f"[Source: {chunk.doc_name}{section}, {location}]\n{chunk.text}"
+            )
 
         diagram_recipes = self._collect_diagram_recipes(chunks)
 
@@ -387,12 +421,19 @@ class RetrievalPipeline:
             context = self.assemble_context(top, turn_id)
             elapsed_ms = (time.monotonic() - start) * 1000
 
-            logger.info("Retrieval: %d chunks (threshold=%.2f, %.0fms)", len(top), threshold, elapsed_ms)
+            logger.info(
+                "Retrieval: %d chunks (threshold=%.2f, %.0fms)",
+                len(top),
+                threshold,
+                elapsed_ms,
+            )
             RAG_RETRIEVAL_LATENCY_SECONDS.observe(elapsed_ms / 1000)
             return RetrievalResult(context=context, elapsed_ms=elapsed_ms)
         except Exception as e:
             elapsed_ms = (time.monotonic() - start) * 1000
             RAG_RETRIEVAL_ERRORS_TOTAL.inc()
             logger.error("Retrieval failed: %s", e)
-            context = RetrievalContext(turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True)
+            context = RetrievalContext(
+                turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True
+            )
             return RetrievalResult(context=context, elapsed_ms=elapsed_ms)

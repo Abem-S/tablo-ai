@@ -7,13 +7,13 @@ topics, and session history so the agent can adapt across sessions.
 In production this should be backed by a real database, but JSON files
 work fine for early launch and are trivially replaceable.
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any
 
 logger = logging.getLogger("tablo.learner_memory")
 
@@ -64,11 +64,17 @@ def load_profile(learner_id: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             profile = json.load(f)
-        logger.info("Loaded profile for %s (%d mastered, %d struggles)",
-                    learner_id, len(profile.get("mastered", [])), len(profile.get("struggle_areas", [])))
+        logger.info(
+            "Loaded profile for %s (%d mastered, %d struggles)",
+            learner_id,
+            len(profile.get("mastered", [])),
+            len(profile.get("struggle_areas", [])),
+        )
         return profile
     except Exception as e:
-        logger.warning("Failed to load profile for %s: %s — using default", learner_id, e)
+        logger.warning(
+            "Failed to load profile for %s: %s — using default", learner_id, e
+        )
         return _default_profile(learner_id)
 
 
@@ -112,7 +118,9 @@ def apply_update(profile: dict, update: dict) -> dict:
 
     if "remove_struggle" in update:
         to_remove = set(update["remove_struggle"])
-        profile["struggle_areas"] = [s for s in profile.get("struggle_areas", []) if s not in to_remove]
+        profile["struggle_areas"] = [
+            s for s in profile.get("struggle_areas", []) if s not in to_remove
+        ]
 
     if "mastered" in update:
         existing = set(profile.get("mastered", []))
@@ -120,7 +128,9 @@ def apply_update(profile: dict, update: dict) -> dict:
         existing.update(new_mastered)
         profile["mastered"] = list(existing)
         # Remove from struggle_areas if now mastered
-        profile["struggle_areas"] = [s for s in profile.get("struggle_areas", []) if s not in new_mastered]
+        profile["struggle_areas"] = [
+            s for s in profile.get("struggle_areas", []) if s not in new_mastered
+        ]
 
     if "hints_that_worked" in update:
         profile.setdefault("hints_that_worked", {}).update(update["hints_that_worked"])
@@ -162,7 +172,9 @@ def format_profile_for_prompt(profile: dict) -> str:
         lines.append(f"**Already mastered:** {', '.join(profile['mastered'][:10])}\n")
 
     if profile.get("struggle_areas"):
-        lines.append(f"**Known struggle areas (be patient, use more visuals):** {', '.join(profile['struggle_areas'][:10])}\n")
+        lines.append(
+            f"**Known struggle areas (be patient, use more visuals):** {', '.join(profile['struggle_areas'][:10])}\n"
+        )
 
     if profile.get("hints_that_worked"):
         lines.append("**Explanations that worked before:**")

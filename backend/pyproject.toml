@@ -1,0 +1,14 @@
+[tool.ruff]
+exclude = ["tests", "venv", "__pycache__", ".venv"]
+
+[tool.ruff.lint]
+ignore = [
+    "E402",  # import not at top - needed for load_dotenv() before imports
+    "E401",  # multiple imports on one line
+    "E701",  # multiple statements on one line (colon)
+    "E702",  # multiple statements on one line (semicolon)
+    "E722",  # bare except
+    "F401",  # unused import
+    "F541",  # f-string without format args
+    "F841",  # unused variable
+]

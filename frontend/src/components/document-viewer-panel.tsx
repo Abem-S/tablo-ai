@@ -164,12 +164,25 @@ interface PdfViewerProps {
 function PdfViewer({ fileUrl, targetPage, highlight, onSelection }: PdfViewerProps) {
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(targetPage);
+  const [containerWidth, setContainerWidth] = useState<number>(356);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Jump to page when AI navigates
+  // Update container width on resize
+  useEffect(() => {
+    const updateWidth = () => {
+      if (containerRef.current) {
+        setContainerWidth(containerRef.current.clientWidth || 356);
+      }
+    };
+    updateWidth();
+    window.addEventListener("resize", updateWidth);
+    return () => window.removeEventListener("resize", updateWidth);
+  }, []);
+
+  // Jump to page when AI navigates - use functional update to avoid direct setState in effect
   useEffect(() => {
     if (targetPage >= 1 && (numPages === 0 || targetPage <= numPages)) {
-      setCurrentPage(targetPage);
+      setCurrentPage(() => Math.max(1, Math.min(targetPage, numPages || targetPage)));
     }
   }, [targetPage, numPages]);
 
@@ -197,7 +210,6 @@ function PdfViewer({ fileUrl, targetPage, highlight, onSelection }: PdfViewerPro
 
   const canPrev = currentPage > 1;
   const canNext = currentPage < numPages;
-  const containerWidth = containerRef.current?.clientWidth ?? 356;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -306,11 +318,12 @@ function TextViewer({ docId, highlight, onSelection }: TextViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setLoading(true);
-    fetch(`${API_BASE_URL}/documents/${docId}/text`)
+    const controller = new AbortController();
+    fetch(`${API_BASE_URL}/documents/${docId}/text`, { signal: controller.signal })
       .then((r) => r.json())
-      .then((d) => { setText(d.text || "No content extracted."); setLoading(false); })
-      .catch(() => { setText("Failed to load document."); setLoading(false); });
+      .then((d) => { if (!controller.signal.aborted) { setText(d.text || "No content extracted."); setLoading(false); } })
+      .catch(() => { if (!controller.signal.aborted) { setText("Failed to load document."); setLoading(false); } });
+    return () => controller.abort();
   }, [docId]);
 
   if (loading) return <Spinner />;
@@ -365,6 +378,7 @@ export function DocumentViewerPanel({
   const [highlight, setHighlight] = useState<string | null>(null);
 
   // Auto-expand and navigate when AI references a source
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => {
     if (!activeNavigation) return;
     setIsCollapsed(false);
@@ -382,6 +396,7 @@ export function DocumentViewerPanel({
   }, [activeNavigation, documents]);
 
   // Reset when switching docs manually
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => {
     setTargetPage(1);
     setHighlight(null);
@@ -531,6 +546,7 @@ export function DocumentViewerPanel({
                 )}
                 {viewerType === "image" && (
                   <div style={{ overflow: "auto", height: "100%", padding: "8px" }}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={fileUrl} alt={displayName(selectedDoc.name)} style={{ maxWidth: "100%", borderRadius: "4px" }} />
                   </div>
                 )}

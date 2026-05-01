@@ -1,4 +1,5 @@
 """Restore a Qdrant collection snapshot."""
+
 from __future__ import annotations
 
 import json
@@ -22,7 +23,9 @@ def main() -> int:
     snapshot = sys.argv[2]
     base = os.getenv("QDRANT_URL", "http://localhost:6333").rstrip("/")
 
-    data = _request("POST", f"{base}/collections/{collection}/snapshots/{snapshot}/recover")
+    data = _request(
+        "POST", f"{base}/collections/{collection}/snapshots/{snapshot}/recover"
+    )
     ok = data.get("status", "") == "ok"
     print("Restore result:", data)
     return 0 if ok else 1

@@ -9,6 +9,7 @@ Architecture:
 - The agent can update the learner profile mid-session via update_learner_profile tool
 - RAG retrieval runs on the warm path (never blocks voice)
 """
+
 import asyncio
 import json
 import logging
@@ -19,21 +20,34 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from dotenv import load_dotenv
-
-from livekit.agents import Agent, AgentSession, JobContext, RunContext, WorkerOptions, cli, function_tool, room_io
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    JobContext,
+    RunContext,
+    WorkerOptions,
+    cli,
+    function_tool,
+    room_io,
+)
 from livekit.plugins import google
 from google.genai import types as genai_types
-
-load_dotenv()
 
 from rag.knowledge_graph import KnowledgeGraph
 from rag.ingestion import IngestionPipeline
 from rag.retrieval import RetrievalPipeline, compress_context
 from rag.orchestrator import RAGOrchestrator
-from learner_memory import load_profile, save_profile, apply_update, format_profile_for_prompt
+from learner_memory import (
+    load_profile,
+    save_profile,
+    apply_update,
+    format_profile_for_prompt,
+)
 from skills_loader import build_system_prompt
 from config import get_env
 from math_eval import evaluate_expression, MathEvaluationError
+from mcp_tools import bind_agent_tools
+from auth import LOCAL_ADMIN_USER_ID
 from observability import (
     AGENT_TOOL_CALLS_TOTAL,
     AGENT_TOOL_ERRORS_TOTAL,
@@ -42,6 +56,8 @@ from observability import (
     init_tracing,
     start_metrics_server,
 )
+
+load_dotenv()
 
 # The livekit-plugins-google reads GOOGLE_API_KEY from env.
 # We alias GEMINI_API_KEY -> GOOGLE_API_KEY so both names work, including secrets files.
@@ -64,7 +80,9 @@ class AgentHealthState:
     last_event: str = ""
     updated_at: float = 0.0
 
-    def update(self, status: str, room: str | None = None, event: str | None = None) -> None:
+    def update(
+        self, status: str, room: str | None = None, event: str | None = None
+    ) -> None:
         self.status = status
         if room is not None:
             self.room = room
@@ -130,6 +148,16 @@ class TabloAgent(Agent):
         self._learner_context: dict | None = None
         self._session: AgentSession | None = None  # set after session.start()
         self._latest_board_snapshot: str = ""  # latest PNG as base64
+        self._latest_board_description: str = (
+            ""  # proactive description of latest snapshot
+        )
+
+        # Board context accumulated from board.delta / board.selection / board.cursor
+        # These give the agent a live picture of what's on the board without
+        # needing to call get_board_state every turn.
+        self._board_delta_summary: str = ""  # latest board.delta payload
+        self._board_selection: list[str] = []  # currently selected shape IDs
+        self._board_cursor: dict | None = None  # latest cursor position {x, y}
 
     async def _publish_board_command(self, command: dict) -> None:
         payload = json.dumps(command).encode("utf-8")
@@ -157,10 +185,156 @@ class TabloAgent(Agent):
             image_b64 = payload.get("image_b64", "")
             if not image_b64:
                 return
+            prev_snapshot = self._latest_board_snapshot
             self._latest_board_snapshot = image_b64
             logger.debug("Board snapshot stored (%d b64 chars)", len(image_b64))
+
+            # If the snapshot changed significantly and the session is active,
+            # proactively describe it so the agent is aware of freehand content
+            # without needing to be explicitly asked.
+            # We only do this when the snapshot is new (not the initial empty board).
+            if (
+                prev_snapshot
+                and image_b64 != prev_snapshot
+                and self._session is not None
+            ):
+                asyncio.create_task(self._proactive_board_awareness())
         except Exception as e:
             logger.warning("Failed to handle board snapshot: %s", e)
+
+    async def _proactive_board_awareness(self) -> None:
+        """Silently describe the board snapshot and store the description.
+
+        This runs in the background after a snapshot update. It does NOT
+        inject into the live session context (that causes 1008 disconnects).
+        Instead it updates _latest_board_description so the agent can
+        reference it when the learner speaks next.
+        """
+        try:
+            if not self._latest_board_snapshot:
+                return
+            from google import genai as _genai
+            from google.genai import types as _types
+            import base64 as _b64
+
+            api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
+            if not api_key:
+                return
+            client = _genai.Client(api_key=api_key)
+            png_bytes = _b64.b64decode(self._latest_board_snapshot)
+            for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[
+                            _types.Part.from_bytes(
+                                data=png_bytes, mime_type="image/png"
+                            ),
+                            "Describe what is written or drawn on this whiteboard. "
+                            "Be specific about text content, equations, diagrams, shapes, and their positions. "
+                            "If there is handwritten text or freehand drawing, transcribe/describe it exactly. "
+                            "Keep the description concise (2-3 sentences max).",
+                        ],
+                    )
+                    description = (response.text or "").strip()
+                    if description:
+                        self._latest_board_description = description
+                        logger.debug(
+                            "Proactive board description: %s", description[:80]
+                        )
+                        return
+                except Exception as e:
+                    logger.debug(
+                        "Proactive board description failed with %s: %s", model, e
+                    )
+        except Exception as e:
+            logger.debug("_proactive_board_awareness failed: %s", e)
+
+    def _handle_board_delta(self, data: bytes) -> None:
+        """Receive a board.delta and update the board summary.
+
+        board.delta is published by the frontend whenever shapes are added,
+        moved, or deleted. It carries a compact JSON summary of the change
+        so the agent always has an up-to-date picture of the board state
+        without polling get_board_state.
+
+        Payload schema:
+          { "op": "add"|"update"|"delete",
+            "shapes": [{ "id": str, "type": str, "label": str,
+                         "x": int, "y": int, "w": int, "h": int }],
+            "shapeCount": int }
+        """
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            op = payload.get("op", "")
+            shape_count = payload.get("shapeCount", 0)
+            shapes = payload.get("shapes", [])
+            # Build a compact summary string the agent can reference
+            if shapes:
+                shape_desc = ", ".join(
+                    f"{s.get('type', '?')}({s.get('label', '')[:20]})"
+                    for s in shapes[:5]
+                )
+                self._board_delta_summary = (
+                    f"[board.delta op={op} shapes={shape_count} changed={shape_desc}]"
+                )
+            else:
+                self._board_delta_summary = (
+                    f"[board.delta op={op} shapes={shape_count}]"
+                )
+            logger.debug("Board delta: %s", self._board_delta_summary)
+        except Exception as e:
+            logger.warning("Failed to handle board.delta: %s", e)
+
+    def _handle_board_selection(self, data: bytes) -> None:
+        """Receive a board.selection and update the selected shape IDs.
+
+        board.selection is published whenever the user selects or deselects
+        shapes. The agent can use this to understand what the learner is
+        pointing at without needing to call get_board_state.
+
+        Payload schema:
+          { "selectedIds": [str, ...], "count": int }
+        """
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            self._board_selection = payload.get("selectedIds", [])
+            logger.debug(
+                "Board selection: %d shapes selected", len(self._board_selection)
+            )
+        except Exception as e:
+            logger.warning("Failed to handle board.selection: %s", e)
+
+    def _handle_board_cursor(self, data: bytes) -> None:
+        """Receive a board.cursor and update the cursor position.
+
+        board.cursor is published on pointer move (throttled to ~10Hz).
+        The agent can use this to understand where the learner is pointing.
+
+        Payload schema:
+          { "x": float, "y": float }
+        """
+        try:
+            payload = json.loads(data.decode("utf-8"))
+            x = payload.get("x")
+            y = payload.get("y")
+            if x is not None and y is not None:
+                self._board_cursor = {"x": x, "y": y}
+        except Exception as e:
+            logger.warning("Failed to handle board.cursor: %s", e)
+
+    def get_board_context_summary(self) -> str:
+        """Return a compact summary of current board context for the RAG orchestrator."""
+        parts = []
+        if self._board_delta_summary:
+            parts.append(self._board_delta_summary)
+        if self._board_selection:
+            parts.append(f"selected={len(self._board_selection)} shapes")
+        if self._board_cursor:
+            parts.append(
+                f"cursor=({self._board_cursor['x']:.0f},{self._board_cursor['y']:.0f})"
+            )
+        return " ".join(parts) if parts else ""
 
     # ─── Tools ────────────────────────────────────────────────────────────────
 
@@ -192,16 +366,22 @@ class TabloAgent(Agent):
                     command["v"] = 1
                 if "id" not in command:
                     command["id"] = str(uuid4())
-                if command.get("op") == "create_svg" and isinstance(command.get("svg"), str):
-                    command["svg"] = command["svg"].replace('\"', "'")
+                if command.get("op") == "create_svg" and isinstance(
+                    command.get("svg"), str
+                ):
+                    command["svg"] = command["svg"].replace('"', "'")
 
                 logger.info("Board command: %s", command.get("op"))
                 await self._publish_board_command(command)
 
                 if command.get("op") == "get_board_state":
-                    self._pending_board_response = asyncio.get_running_loop().create_future()
+                    self._pending_board_response = (
+                        asyncio.get_running_loop().create_future()
+                    )
                     try:
-                        result = await asyncio.wait_for(self._pending_board_response, timeout=3.0)
+                        result = await asyncio.wait_for(
+                            self._pending_board_response, timeout=3.0
+                        )
                         self._pending_board_response = None
                         return f"board state: {result}"
                     except asyncio.TimeoutError:
@@ -225,6 +405,7 @@ class TabloAgent(Agent):
         - When you need to read handwritten text or equations on the board
         - When you want to check the student's work visually
         - When you're about to explain something and want to see the current board state
+        - ALWAYS call this before commenting on anything the student drew freehand
 
         Returns a description of what you can see on the board.
         """
@@ -232,28 +413,42 @@ class TabloAgent(Agent):
             if not self._latest_board_snapshot:
                 return "No board snapshot available yet. The board may be empty."
 
+            # Fast path: return the proactive description if it's fresh
+            # (computed in the background after each snapshot update)
+            if self._latest_board_description:
+                desc = self._latest_board_description
+                self._latest_board_description = (
+                    ""  # consume it — next call gets a fresh one
+                )
+                logger.info("get_board_image (cached): %s", desc[:80])
+                return f"Current board shows: {desc}"
+
+            # Slow path: call Gemini vision directly
             try:
                 from google import genai as _genai
                 from google.genai import types as _types
+
                 api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
                 if not api_key:
                     return "Board snapshot available but Gemini API is not configured."
                 client = _genai.Client(api_key=api_key)
 
                 import base64 as _b64
+
                 png_bytes = _b64.b64decode(self._latest_board_snapshot)
 
-                # Use gemini-2.5-flash to describe what's on the board, with fallback
                 description = ""
                 for model in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
                     try:
                         response = client.models.generate_content(
                             model=model,
                             contents=[
-                                _types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
+                                _types.Part.from_bytes(
+                                    data=png_bytes, mime_type="image/png"
+                                ),
                                 "Describe what is written or drawn on this whiteboard. "
                                 "Be specific about text content, equations, diagrams, shapes, and their positions. "
-                                "If there is handwritten text, transcribe it exactly. "
+                                "If there is handwritten text or freehand drawing, transcribe/describe it exactly. "
                                 "Keep the description concise (2-3 sentences max).",
                             ],
                         )
@@ -268,7 +463,6 @@ class TabloAgent(Agent):
                 return f"Current board shows: {description}"
             except Exception as e:
                 logger.warning("get_board_image failed: %s", e)
-                # Fallback: return that we have a snapshot but couldn't describe it
                 return f"Board snapshot available ({len(self._latest_board_snapshot)} chars) but description failed: {e}"
 
     @function_tool()
@@ -301,7 +495,7 @@ class TabloAgent(Agent):
                 if self._learner_context:
                     lc = self._learner_context
                     query = (
-                        f"[Learner is pointing to: \"{lc.get('text', '')[:200]}\" "
+                        f'[Learner is pointing to: "{lc.get("text", "")[:200]}" '
                         f"from {lc.get('doc_name', '')} p.{lc.get('page_number', '?')}] {query}"
                     )
                     self._learner_context = None
@@ -313,10 +507,16 @@ class TabloAgent(Agent):
                     threshold=0.1,  # low threshold — Qdrant cosine scores differ from ChromaDB
                 )
 
-                logger.info("search_documents: retrieved %d chunks, is_general_knowledge=%s",
-                            len(result.context.sources), result.context.is_general_knowledge)
+                logger.info(
+                    "search_documents: retrieved %d chunks, is_general_knowledge=%s",
+                    len(result.context.sources),
+                    result.context.is_general_knowledge,
+                )
 
-                if result.context.is_general_knowledge or not result.context.context_text:
+                if (
+                    result.context.is_general_knowledge
+                    or not result.context.context_text
+                ):
                     return "No relevant passages found in uploaded documents for this query."
 
                 # Publish sources to frontend so viewer navigates to the right page
@@ -353,17 +553,26 @@ class TabloAgent(Agent):
                 if self._collection_name is None:
                     return "No documents available."
 
-                from rag.vector_store import get_points_by_doc_id, _get_client, collection_name
+                from rag.vector_store import _get_client
+
                 client = _get_client()
                 col = self._collection_name
 
                 # Search all points for one with matching page_number and a diagram_recipe
                 import json as _json
+
                 # Scroll through collection to find diagram for this page
                 from qdrant_client.models import Filter, FieldCondition, MatchValue
+
                 results, _ = client.scroll(
                     collection_name=col,
-                    scroll_filter=Filter(must=[FieldCondition(key="page_number", match=MatchValue(value=page_number))]),
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="page_number", match=MatchValue(value=page_number)
+                            )
+                        ]
+                    ),
                     limit=10,
                     with_payload=True,
                     with_vectors=False,
@@ -386,15 +595,20 @@ class TabloAgent(Agent):
 
                 from rag.diagram_extractor import DiagramExtractor
                 from google import genai as _genai
+
                 api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
                 if not api_key:
                     return "Gemini API is not configured for diagram generation."
                 client = _genai.Client(api_key=api_key)
                 extractor = DiagramExtractor(client)
-                commands = await extractor.generate_commands(description, image_b64=image_b64)
+                commands = await extractor.generate_commands(
+                    description, image_b64=image_b64
+                )
 
                 if not commands:
-                    return f"Could not generate drawing commands for page {page_number}."
+                    return (
+                        f"Could not generate drawing commands for page {page_number}."
+                    )
 
                 published = 0
                 for cmd in commands:
@@ -409,7 +623,9 @@ class TabloAgent(Agent):
                     except Exception as e:
                         logger.warning("Failed to publish diagram command: %s", e)
 
-                logger.info("Drew diagram from page %d: %d commands", page_number, published)
+                logger.info(
+                    "Drew diagram from page %d: %d commands", page_number, published
+                )
                 return f"Drew diagram from page {page_number} ({published} shapes)."
             except Exception as e:
                 logger.error("draw_diagram failed for page %d: %s", page_number, e)
@@ -432,7 +648,9 @@ class TabloAgent(Agent):
                 return f"Could not evaluate '{expression}': {e}"
 
     @function_tool()
-    async def update_learner_profile(self, context: RunContext, update_json: str) -> str:
+    async def update_learner_profile(
+        self, context: RunContext, update_json: str
+    ) -> str:
         """Update the learner's persistent profile based on what you've observed this session.
 
         Call this when you observe something meaningful about how this learner learns.
@@ -464,7 +682,11 @@ class TabloAgent(Agent):
                 update = json.loads(update_json)
                 self._learner_profile = apply_update(self._learner_profile, update)
                 save_profile(self._learner_profile)
-                logger.info("Updated learner profile for %s: %s", self._learner_id, list(update.keys()))
+                logger.info(
+                    "Updated learner profile for %s: %s",
+                    self._learner_id,
+                    list(update.keys()),
+                )
                 return f"Learner profile updated: {list(update.keys())}"
             except json.JSONDecodeError as e:
                 return f"Error: Invalid JSON — {e}"
@@ -474,6 +696,7 @@ class TabloAgent(Agent):
 
 
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
+
 
 async def entrypoint(ctx: JobContext):
     _agent_health.update("starting", room=ctx.room.name, event="job_received")
@@ -497,21 +720,24 @@ async def entrypoint(ctx: JobContext):
     profile_section = format_profile_for_prompt(learner_profile)
     system_prompt = build_system_prompt(learner_profile_section=profile_section)
 
-    logger.info("Loaded profile for learner '%s' — %d mastered, %d struggles",
-                learner_id,
-                len(learner_profile.get("mastered", [])),
-                len(learner_profile.get("struggle_areas", [])))
+    logger.info(
+        "Loaded profile for learner '%s' — %d mastered, %d struggles",
+        learner_id,
+        len(learner_profile.get("mastered", [])),
+        len(learner_profile.get("struggle_areas", [])),
+    )
 
     # Initialise RAG components
-    # Use shared collection so agent and FastAPI both read/write the same data.
-    # In production this becomes per-user once auth is added.
+    # Use LOCAL_ADMIN_USER_ID so the agent reads/writes the same per-user
+    # Qdrant collection as the FastAPI document endpoints.
+    # In a SaaS fork, replace this with the authenticated user's ID.
     kg = KnowledgeGraph()
     kg.load()
-    ingestion = IngestionPipeline(knowledge_graph=kg, user_id=None)  # tablo_shared
+    ingestion = IngestionPipeline(knowledge_graph=kg, user_id=LOCAL_ADMIN_USER_ID)
     retrieval = RetrievalPipeline(
         knowledge_graph=kg,
         collection=ingestion._collection,
-        user_id=None,
+        user_id=LOCAL_ADMIN_USER_ID,
     )
 
     model = google.beta.realtime.RealtimeModel(
@@ -543,6 +769,10 @@ async def entrypoint(ctx: JobContext):
         rag_orchestrator=None,
         collection_name=ingestion._collection,
     )
+
+    # Bind the agent's tools to the MCP registry so external MCP clients
+    # and LangGraph sub-agents can call them without importing TabloAgent.
+    bind_agent_tools(tablo_agent)
 
     rag_orchestrator = RAGOrchestrator(
         retrieval_pipeline=retrieval,
@@ -576,10 +806,12 @@ async def entrypoint(ctx: JobContext):
     def on_user_speech_committed(msg):
         transcript = getattr(msg, "text", "") or str(msg)
         turn_id = str(uuid4())
+        # Include live board context (delta + selection + cursor) in the warm-path query
+        board_summary = tablo_agent.get_board_context_summary()
         asyncio.create_task(
             rag_orchestrator.on_user_turn(
                 transcript=transcript,
-                board_summary="",
+                board_summary=board_summary,
                 turn_id=turn_id,
             )
         )
@@ -610,12 +842,24 @@ async def entrypoint(ctx: JobContext):
                 asyncio.create_task(
                     tablo_agent._handle_board_snapshot(bytes(data_packet.data))
                 )
+            elif topic == "board.delta":
+                # Incremental board change — update agent's board context summary
+                tablo_agent._handle_board_delta(bytes(data_packet.data))
+            elif topic == "board.selection":
+                # Shape selection changed — update agent's selection state
+                tablo_agent._handle_board_selection(bytes(data_packet.data))
+            elif topic == "board.cursor":
+                # Cursor moved — update agent's cursor position (high-frequency, sync)
+                tablo_agent._handle_board_cursor(bytes(data_packet.data))
             elif topic == "learner.context":
                 try:
                     ctx_data = json.loads(bytes(data_packet.data).decode("utf-8"))
                     tablo_agent._learner_context = ctx_data
-                    logger.info("Learner context: %s p.%s",
-                                ctx_data.get("doc_name", ""), ctx_data.get("page_number", ""))
+                    logger.info(
+                        "Learner context: %s p.%s",
+                        ctx_data.get("doc_name", ""),
+                        ctx_data.get("page_number", ""),
+                    )
                 except Exception as e:
                     logger.warning("Failed to parse learner.context: %s", e)
             elif topic == "tutor.sources":

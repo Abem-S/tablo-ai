@@ -90,3 +90,15 @@ Expression syntax: `sin(x)`, `cos(x)`, `tan(x)`, `x^2`, `sqrt(x)`, `log(x)`, `ex
 {"op":"suggest_placement","preferredRegion":"right"}
 {"op":"calculate_position","sourceShapeId":"shape:abc","relativeTo":"right","offset":50}
 ```
+
+## 3D Shapes (Isometric Projection)
+
+```json
+{"op":"create_3d_cube","x":200,"y":200,"size":120,"label":"Cube"}
+{"op":"create_3d_prism","x":200,"y":200,"width":150,"height":100,"depth":80}
+{"op":"create_3d_prism","x":200,"y":200,"width":120,"height":100,"depth":80,"triangular":true}
+{"op":"create_3d_cylinder","x":200,"y":200,"radius":60,"height":100,"label":"Cylinder"}
+{"op":"create_3d_cone","x":200,"y":200,"radius":60,"height":100,"label":"Cone"}
+{"op":"create_3d_pyramid","x":200,"y":200,"baseSize":120,"height":100,"label":"Pyramid"}
+```
+All 3D shapes use isometric projection. Use them for geometry lessons, 3D structure diagrams, or volume/surface area problems.

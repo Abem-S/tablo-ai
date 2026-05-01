@@ -5,26 +5,133 @@ on:
     branches: ["main", "master"]
   pull_request:
 
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend-unit:
+  # ─── Backend: Lint (Ruff) ────────────────────────────────────────────────────
+  backend-lint:
+    name: Backend — Ruff lint & format
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install backend deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r backend/requirements.txt
+      - name: Install Ruff
+        run: pip install ruff==0.4.4
 
-      - name: Run unit test suites
+      - name: Ruff lint
+        run: ruff check backend/ --output-format=github
+
+      - name: Ruff format check
+        run: ruff format backend/ --check
+
+  # ─── Backend: Unit tests (no external deps) ──────────────────────────────────
+  backend-unit:
+    name: Backend — Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Run unit test suites (no external deps)
         run: |
-          python backend/tests/test_skills.py
-          python backend/tests/test_formats.py
-          python backend/tests/test_calculate.py
-          python backend/tests/test_compression.py
+          cd backend
+          python tests/test_skills.py
+          python tests/test_formats.py
+          python tests/test_calculate.py
+          python tests/test_compression.py
+
+  # ─── Frontend: Lint (ESLint + TypeScript) ────────────────────────────────────
+  frontend-lint:
+    name: Frontend — ESLint + TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+        working-directory: frontend
+
+      - name: ESLint
+        run: npm run lint
+        working-directory: frontend
+
+  # ─── Frontend: Build check ───────────────────────────────────────────────────
+  frontend-build:
+    name: Frontend — Next.js build
+    runs-on: ubuntu-latest
+    needs: [frontend-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_BASE_URL: "http://localhost:8000"
+
+  # ─── AI PR Reviewer (Gemini) ─────────────────────────────────────────────────
+  # Runs only on PRs, not on direct pushes to main.
+  # Posts a review comment with Gemini's analysis of the diff.
+  ai-review:
+    name: AI PR Review (Gemini)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install review deps
+        run: pip install google-genai==1.16.0 requests==2.32.3
+
+      - name: Run AI reviewer
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python .github/scripts/ai_pr_review.py

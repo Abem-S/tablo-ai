@@ -1,4 +1,5 @@
 """Diagram extraction: render PDF pages to images and call Gemini vision."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,8 +15,8 @@ logger = logging.getLogger("tablo-rag.diagram")
 
 _RENDER_DPI = 150
 _RETRIES = 2
-_RECIPE_TIMEOUT_S = 20.0   # per-page vision timeout
-_MAX_CONCURRENT = 5        # max parallel Gemini vision calls
+_RECIPE_TIMEOUT_S = 20.0  # per-page vision timeout
+_MAX_CONCURRENT = 5  # max parallel Gemini vision calls
 
 # At ingestion time we only extract a short description — no commands.
 # Commands are generated on-demand at teaching time via draw_diagram tool.
@@ -33,8 +34,8 @@ Return ONLY valid JSON, no markdown fences."""
 
 @dataclass
 class PageImage:
-    page_number: int   # 1-based
-    png_bytes: bytes   # in-memory PNG, never written to disk
+    page_number: int  # 1-based
+    png_bytes: bytes  # in-memory PNG, never written to disk
 
 
 class DiagramExtractor:
@@ -54,6 +55,7 @@ class DiagramExtractor:
         """
         try:
             import fitz
+
             page = pdf_doc[page_number - 1]
             matrix = fitz.Matrix(_RENDER_DPI / 72, _RENDER_DPI / 72)
             pixmap = page.get_pixmap(matrix=matrix)
@@ -104,25 +106,41 @@ class DiagramExtractor:
                 return DiagramRecipe(
                     page_number=image.page_number,
                     description=description,
-                    image_b64=__import__("base64").b64encode(image.png_bytes).decode("utf-8"),
+                    image_b64=__import__("base64")
+                    .b64encode(image.png_bytes)
+                    .decode("utf-8"),
                 )
             except json.JSONDecodeError as e:
-                logger.warning("Page %d: malformed JSON from Gemini vision: %s", image.page_number, e)
+                logger.warning(
+                    "Page %d: malformed JSON from Gemini vision: %s",
+                    image.page_number,
+                    e,
+                )
                 return None
             except Exception as e:
                 last_error = e
                 if attempt < _RETRIES:
                     logger.warning(
                         "Page %d: vision attempt %d failed: %s — retrying in %.1fs",
-                        image.page_number, attempt + 1, e, delay,
+                        image.page_number,
+                        attempt + 1,
+                        e,
+                        delay,
                     )
                     await asyncio.sleep(delay)
                     delay *= 2
 
-        logger.warning("Page %d: vision failed after %d attempts: %s", image.page_number, _RETRIES + 1, last_error)
+        logger.warning(
+            "Page %d: vision failed after %d attempts: %s",
+            image.page_number,
+            _RETRIES + 1,
+            last_error,
+        )
         return None
 
-    async def generate_commands(self, description: str, image_b64: str = "") -> list[dict]:
+    async def generate_commands(
+        self, description: str, image_b64: str = ""
+    ) -> list[dict]:
         """Generate tldraw drawing commands from a diagram.
 
         If image_b64 is provided, uses the actual page image for accurate visual reproduction.
@@ -151,9 +169,12 @@ class DiagramExtractor:
 
                 if image_b64:
                     import base64
+
                     png_bytes = base64.b64decode(image_b64)
                     contents = [
-                        genai_types.Part.from_bytes(data=png_bytes, mime_type="image/png"),
+                        genai_types.Part.from_bytes(
+                            data=png_bytes, mime_type="image/png"
+                        ),
                         (
                             "Reproduce the diagram shown in this image as tldraw drawing commands.\n"
                             "Capture the structure, labels, and connections as faithfully as possible.\n"
@@ -183,7 +204,11 @@ class DiagramExtractor:
                 return []
             except Exception as e:
                 if attempt < _RETRIES:
-                    logger.warning("generate_commands attempt %d failed: %s — retrying", attempt + 1, e)
+                    logger.warning(
+                        "generate_commands attempt %d failed: %s — retrying",
+                        attempt + 1,
+                        e,
+                    )
                     await asyncio.sleep(delay)
                     delay *= 2
 
@@ -208,7 +233,11 @@ class DiagramExtractor:
             raise ValueError(f"Failed to open PDF for diagram extraction: {e}") from e
 
         page_count = len(pdf_doc)
-        logger.info("Extracting diagrams from %d pages in %s", page_count, os.path.basename(pdf_path))
+        logger.info(
+            "Extracting diagrams from %d pages in %s",
+            page_count,
+            os.path.basename(pdf_path),
+        )
 
         # Render all pages (sync, fast)
         images: list[PageImage | None] = []
@@ -224,7 +253,9 @@ class DiagramExtractor:
         # Extract recipes concurrently with semaphore to limit parallel API calls
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
 
-        async def safe_extract(img: PageImage | None) -> tuple[int, DiagramRecipe | None]:
+        async def safe_extract(
+            img: PageImage | None,
+        ) -> tuple[int, DiagramRecipe | None]:
             if img is None:
                 return (-1, None)
             async with semaphore:
@@ -235,10 +266,18 @@ class DiagramExtractor:
                     )
                     return (img.page_number, recipe)
                 except asyncio.TimeoutError:
-                    logger.warning("Page %d: vision timed out after %.0fs", img.page_number, _RECIPE_TIMEOUT_S)
+                    logger.warning(
+                        "Page %d: vision timed out after %.0fs",
+                        img.page_number,
+                        _RECIPE_TIMEOUT_S,
+                    )
                     return (img.page_number, None)
                 except Exception as e:
-                    logger.warning("Page %d: unexpected error during extraction: %s", img.page_number, e)
+                    logger.warning(
+                        "Page %d: unexpected error during extraction: %s",
+                        img.page_number,
+                        e,
+                    )
                     return (img.page_number, None)
 
         results = await asyncio.gather(*[safe_extract(img) for img in images])
@@ -248,5 +287,9 @@ class DiagramExtractor:
             if recipe is not None:
                 recipes[page_num] = recipe
 
-        logger.info("Diagram extraction complete: %d/%d pages had diagrams", len(recipes), page_count)
+        logger.info(
+            "Diagram extraction complete: %d/%d pages had diagrams",
+            len(recipes),
+            page_count,
+        )
         return recipes

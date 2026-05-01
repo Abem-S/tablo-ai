@@ -1,15 +1,21 @@
 """Observability helpers: metrics, health, and tracing."""
+
 from __future__ import annotations
 
 import json
 import logging
 import os
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Callable
 
-from prometheus_client import Counter, Gauge, Histogram, CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import (
+    Counter,
+    Gauge,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 
 logger = logging.getLogger("tablo.observability")
 
@@ -71,15 +77,19 @@ def init_tracing(service_name: str):
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
         from opentelemetry import trace
+
         return trace.get_tracer(service_name)
 
     if _TRACING_INITIALIZED:
         from opentelemetry import trace
+
         return trace.get_tracer(service_name)
 
     try:
         from opentelemetry import trace
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.instrumentation.logging import LoggingInstrumentor
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
@@ -87,6 +97,7 @@ def init_tracing(service_name: str):
     except Exception as e:
         logger.warning("Tracing dependencies not available: %s", e)
         from opentelemetry import trace
+
         return trace.get_tracer(service_name)
 
     resource = Resource.create({"service.name": service_name})
@@ -112,7 +123,9 @@ def record_http_metrics(method: str, path: str, status: int, duration_s: float) 
 _METRICS_SERVER_STARTED = False
 
 
-def start_metrics_server(port: int, health_fn: Callable[[], dict] | None = None) -> None:
+def start_metrics_server(
+    port: int, health_fn: Callable[[], dict] | None = None
+) -> None:
     """Start a tiny HTTP server exposing /health and /metrics endpoints."""
     global _METRICS_SERVER_STARTED
     if _METRICS_SERVER_STARTED:

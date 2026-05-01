@@ -12,7 +12,7 @@ interface UploadedDoc {
   status: string;
 }
 
-export function DocumentUploadButton() {
+export function DocumentUploadButton({ authHeaders = {} }: { authHeaders?: Record<string, string> }) {
   const [open, setOpen] = useState(false);
   const [docs, setDocs] = useState<UploadedDoc[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -21,7 +21,7 @@ export function DocumentUploadButton() {
 
   const fetchDocs = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/documents`);
+      const res = await fetch(`${API_BASE_URL}/documents`, { headers: authHeaders });
       if (res.ok) setDocs(await res.json());
     } catch {
       // non-fatal
@@ -43,6 +43,7 @@ export function DocumentUploadButton() {
     try {
       const res = await fetch(`${API_BASE_URL}/documents/upload`, {
         method: "POST",
+        headers: authHeaders,
         body: form,
       });
       if (!res.ok) {
@@ -54,6 +55,32 @@ export function DocumentUploadButton() {
         throw new Error(result.chunk_count === 0 ? "Ingestion failed — check backend logs" : `Ingestion failed: ${result.status}`);
       }
       setDocs((prev) => [result, ...prev]);
+
+      // Poll for ingestion completion
+      if (result.status === "processing") {
+        const docId = result.doc_id;
+        const poll = async () => {
+          for (let i = 0; i < 30; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+              const statusRes = await fetch(`${API_BASE_URL}/documents/${docId}/status`, {
+                headers: authHeaders,
+              });
+              if (!statusRes.ok) break;
+              const statusData = await statusRes.json();
+              setDocs((prev) =>
+                prev.map((d) =>
+                  d.doc_id === docId
+                    ? { ...d, chunk_count: statusData.chunk_count, status: statusData.status }
+                    : d
+                )
+              );
+              if (statusData.status !== "processing") break;
+            } catch { break; }
+          }
+        };
+        void poll();
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -65,7 +92,7 @@ export function DocumentUploadButton() {
 
   const handleDelete = async (docId: string) => {
     try {
-      await fetch(`${API_BASE_URL}/documents/${docId}`, { method: "DELETE" });
+      await fetch(`${API_BASE_URL}/documents/${docId}`, { method: "DELETE", headers: authHeaders });
       setDocs((prev) => prev.filter((d) => d.doc_id !== docId));
     } catch {
       // non-fatal
@@ -175,7 +202,11 @@ export function DocumentUploadButton() {
                     {doc.name}
                   </span>
                   <span style={{ color: "rgba(255,255,255,0.35)", flexShrink: 0 }}>
-                    {doc.chunk_count} chunks
+                    {doc.status === "processing"
+                      ? "⏳ indexing…"
+                      : doc.status === "failed"
+                      ? "❌ failed"
+                      : `${doc.chunk_count} chunks`}
                   </span>
                   <button
                     onClick={() => handleDelete(doc.doc_id)}

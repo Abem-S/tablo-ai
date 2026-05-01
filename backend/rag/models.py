@@ -1,4 +1,5 @@
 """Data models for the Tablo RAG system."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,10 +9,13 @@ from enum import Enum
 @dataclass
 class DiagramRecipe:
     """A diagram extracted from a PDF page."""
-    page_number: int          # 1-based page number from source PDF
-    description: str          # Natural-language description of the diagram
+
+    page_number: int  # 1-based page number from source PDF
+    description: str  # Natural-language description of the diagram
     commands: list[dict] = None  # type: ignore  # Not stored at ingestion; generated on-demand
-    image_b64: str = ""       # Base64-encoded PNG of the page (stored at ingestion, used at draw time)
+    image_b64: str = (
+        ""  # Base64-encoded PNG of the page (stored at ingestion, used at draw time)
+    )
 
 
 class RelationType(str, Enum):
@@ -42,8 +46,8 @@ class ChunkWithEmbedding:
 @dataclass
 class ScoredChunk:
     chunk: Chunk
-    score: float          # 0.0–1.0
-    source: str           # "vector" | "graph" | "fused"
+    score: float  # 0.0–1.0
+    source: str  # "vector" | "graph" | "fused"
 
 
 @dataclass
@@ -56,8 +60,8 @@ class ConceptNode:
 
 @dataclass
 class ConceptRelationship:
-    source_concept: str   # concept_id
-    target_concept: str   # concept_id
+    source_concept: str  # concept_id
+    target_concept: str  # concept_id
     rel_type: RelationType
 
 
@@ -67,8 +71,8 @@ class SourceAttribution:
     document_name: str
     page_number: int | None
     section_title: str | None
-    text_excerpt: str     # first ~200 chars of chunk
-    relevance: str        # "high" | "supplementary"
+    text_excerpt: str  # first ~200 chars of chunk
+    relevance: str  # "high" | "supplementary"
     score: float
 
 
@@ -85,12 +89,12 @@ class RetrievalContext:
 class DocumentMetadata:
     doc_id: str
     name: str
-    format: str           # "pdf" | "txt"
+    format: str  # "pdf" | "txt"
     page_count: int | None
     chunk_count: int
     concept_count: int
     ingestion_status: str  # "processing" | "complete" | "failed"
-    ingested_at: str       # ISO timestamp
+    ingested_at: str  # ISO timestamp
     error_message: str | None = None
 
 
@@ -99,7 +103,7 @@ class IngestionResult:
     doc_id: str
     chunk_count: int
     concept_count: int
-    status: str           # "complete" | "failed"
+    status: str  # "complete" | "failed"
     error_message: str | None = None
     diagram_count: int = 0  # pages with successfully generated recipes
 

@@ -1,4 +1,5 @@
 """Create Qdrant collection snapshots (server-side)."""
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,9 @@ def _request(method: str, url: str):
 
 def main() -> int:
     base = os.getenv("QDRANT_URL", "http://localhost:6333").rstrip("/")
-    collections = _request("GET", f"{base}/collections").get("result", {}).get("collections", [])
+    collections = (
+        _request("GET", f"{base}/collections").get("result", {}).get("collections", [])
+    )
     if not collections:
         print("No Qdrant collections found.")
         return 0

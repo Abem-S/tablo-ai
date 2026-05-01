@@ -8,6 +8,7 @@ Connection is configured via env vars:
   QDRANT_URL    — defaults to http://localhost:6333
   QDRANT_API_KEY — optional, required for Qdrant Cloud
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,6 +29,7 @@ DISTANCE = "COSINE"
 def _get_client():
     """Return a configured Qdrant client (lazy import)."""
     from qdrant_client import QdrantClient
+
     url = os.getenv("QDRANT_URL", "http://localhost:6333")
     api_key = os.getenv("QDRANT_API_KEY")  # None for local, set for Qdrant Cloud
     return QdrantClient(url=url, api_key=api_key, timeout=30)
@@ -44,7 +46,8 @@ def collection_name(user_id: str | None = None) -> str:
 
 def ensure_collection(client, name: str) -> None:
     """Create the collection if it doesn't exist, with payload indexes for fast filtering."""
-    from qdrant_client.models import Distance, VectorParams, PayloadSchemaType
+    from qdrant_client.models import Distance, VectorParams
+
     existing = {c.name for c in client.get_collections().collections}
     if name not in existing:
         client.create_collection(
@@ -61,16 +64,21 @@ def ensure_collection(client, name: str) -> None:
 def _ensure_payload_indexes(client, name: str) -> None:
     """Create payload indexes if they don't already exist. Idempotent."""
     from qdrant_client.models import PayloadSchemaType
+
     try:
         info = client.get_collection(name)
-        existing_indexes = set(info.payload_schema.keys()) if info.payload_schema else set()
+        existing_indexes = (
+            set(info.payload_schema.keys()) if info.payload_schema else set()
+        )
         for field, schema in [
             ("doc_id", PayloadSchemaType.KEYWORD),
             ("page_number", PayloadSchemaType.INTEGER),
             ("chunk_index", PayloadSchemaType.INTEGER),
         ]:
             if field not in existing_indexes:
-                client.create_payload_index(collection_name=name, field_name=field, field_schema=schema)
+                client.create_payload_index(
+                    collection_name=name, field_name=field, field_schema=schema
+                )
                 logger.debug("Created payload index: %s.%s", name, field)
     except Exception as e:
         logger.warning("Could not ensure payload indexes for %s: %s", name, e)
@@ -85,6 +93,7 @@ def upsert_chunks(
 ) -> None:
     """Upsert points into a Qdrant collection."""
     from qdrant_client.models import PointStruct
+
     points = [
         PointStruct(id=_str_to_uuid(id_), vector=vec, payload=payload)
         for id_, vec, payload in zip(ids, vectors, payloads)
@@ -101,13 +110,12 @@ def search_vectors(
     filter_: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Search a collection. Returns list of {id, score, payload} dicts."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue, QueryRequest
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
 
     qdrant_filter = None
     if filter_:
         conditions = [
-            FieldCondition(key=k, match=MatchValue(value=v))
-            for k, v in filter_.items()
+            FieldCondition(key=k, match=MatchValue(value=v)) for k, v in filter_.items()
         ]
         qdrant_filter = Filter(must=conditions)
 
@@ -127,10 +135,13 @@ def search_vectors(
 def delete_by_doc_id(client, collection: str, doc_id: str) -> int:
     """Delete all points with a given doc_id. Returns count deleted."""
     from qdrant_client.models import Filter, FieldCondition, MatchValue
+
     # Scroll to count first
     points, _ = client.scroll(
         collection_name=collection,
-        scroll_filter=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
+        scroll_filter=Filter(
+            must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+        ),
         limit=10000,
         with_payload=False,
     )
@@ -138,7 +149,9 @@ def delete_by_doc_id(client, collection: str, doc_id: str) -> int:
     if count:
         client.delete(
             collection_name=collection,
-            points_selector=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
+            points_selector=Filter(
+                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+            ),
         )
     logger.info("Deleted %d points for doc_id=%s from %s", count, doc_id, collection)
     return count
@@ -146,7 +159,6 @@ def delete_by_doc_id(client, collection: str, doc_id: str) -> int:
 
 def list_docs_in_collection(client, collection: str) -> list[dict]:
     """Return document metadata grouped by doc_id."""
-    from qdrant_client.models import Filter
     try:
         all_points = []
         offset = None
@@ -170,7 +182,11 @@ def list_docs_in_collection(client, collection: str) -> list[dict]:
             if not did:
                 continue
             if did not in docs:
-                docs[did] = {"doc_id": did, "name": p.get("doc_name", ""), "chunk_count": 0}
+                docs[did] = {
+                    "doc_id": did,
+                    "name": p.get("doc_name", ""),
+                    "chunk_count": 0,
+                }
             docs[did]["chunk_count"] += 1
         return list(docs.values())
     except Exception as e:
@@ -181,9 +197,12 @@ def list_docs_in_collection(client, collection: str) -> list[dict]:
 def get_points_by_doc_id(client, collection: str, doc_id: str) -> list[dict]:
     """Fetch all points for a doc_id. Returns list of payload dicts."""
     from qdrant_client.models import Filter, FieldCondition, MatchValue
+
     points, _ = client.scroll(
         collection_name=collection,
-        scroll_filter=Filter(must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]),
+        scroll_filter=Filter(
+            must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+        ),
         limit=10000,
         with_payload=True,
         with_vectors=False,

@@ -1,9 +1,9 @@
 """Safe math expression evaluation for the agent's calculate tool."""
+
 from __future__ import annotations
 
 import io
 import math
-from dataclasses import dataclass
 
 from asteval import Interpreter
 

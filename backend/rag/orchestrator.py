@@ -1,19 +1,27 @@
-"""LangGraph warm-path orchestrator for RAG retrieval and context injection."""
+"""RAG orchestrator — delegates to the LangGraph multi-agent pipeline.
+
+The public interface (RAGOrchestrator) is unchanged so agent.py needs no edits.
+Internally, on_user_turn now drives the LangGraph graph defined in
+rag/langgraph_orchestrator.py, which runs query rewriting, vector search,
+graph search, RRF merging, context compression, and diagram hint collection
+all in parallel sub-agents to minimise latency.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-from uuid import uuid4
 
 from .models import RetrievalContext, SourceAttribution
 from .retrieval import RetrievalPipeline
+from .langgraph_orchestrator import run_rag_graph
 from config import get_env
 
 logger = logging.getLogger("tablo-rag.orchestrator")
 
-_RETRIEVAL_TIMEOUT_S = 5.0
+_RETRIEVAL_TIMEOUT_S = float(os.getenv("RAG_TOTAL_TIMEOUT_S", "8"))
 _REWRITE_TIMEOUT_S = float(os.getenv("RAG_REWRITE_TIMEOUT_S", "4"))
 
 
@@ -23,7 +31,9 @@ class RAGOrchestrator:
     Never blocks the hot path. All exceptions are caught internally.
     """
 
-    def __init__(self, retrieval_pipeline: RetrievalPipeline, tablo_agent, room) -> None:
+    def __init__(
+        self, retrieval_pipeline: RetrievalPipeline, tablo_agent, room
+    ) -> None:
         self._retrieval = retrieval_pipeline
         self._agent = tablo_agent
         self._room = room
@@ -36,10 +46,14 @@ class RAGOrchestrator:
     # Entry point (fire-and-forget)
     # ------------------------------------------------------------------
 
-    async def on_user_turn(self, transcript: str, board_summary: str, turn_id: str) -> None:
-        """Called on user_speech_committed. Runs retrieval on warm path.
+    async def on_user_turn(
+        self, transcript: str, board_summary: str, turn_id: str
+    ) -> None:
+        """Called on user_speech_committed. Drives the LangGraph RAG pipeline.
 
-        This method catches all exceptions — the hot path must never be blocked.
+        Delegates to run_rag_graph() which runs query rewriting, vector search,
+        graph search, RRF merging, compression, and diagram hints all in parallel
+        sub-agents. All exceptions are caught — the hot path must never be blocked.
         """
         self._current_turn_id = turn_id
         self._recent_transcripts.append(transcript)
@@ -47,38 +61,51 @@ class RAGOrchestrator:
             self._recent_transcripts.pop(0)
 
         try:
-            await asyncio.wait_for(
-                self._run_retrieval_cycle(transcript, board_summary, turn_id),
-                timeout=_RETRIEVAL_TIMEOUT_S,
+            result = await run_rag_graph(
+                transcript=transcript,
+                board_summary=board_summary,
+                turn_id=turn_id,
+                collection=self._retrieval._collection,
+                user_id=self._retrieval._user_id,
+                session_topic=self._session_topic,
+                recent_transcripts=list(self._recent_transcripts),
             )
-        except asyncio.TimeoutError:
-            logger.warning("RAG retrieval timed out for turn %s — continuing with existing context", turn_id)
+
+            # Always publish sources to frontend for viewer navigation
+            await self.publish_sources(
+                result.sources,
+                turn_id,
+                result.is_general_knowledge,
+                navigate_to=result.navigate_to,
+            )
+
+            # Inject context into agent instructions if relevant content found
+            if (
+                not result.is_general_knowledge
+                and result.context
+                and result.context.context_text
+            ):
+                await self.inject_context(result.context, turn_id)
+
+            if result.errors:
+                logger.debug(
+                    "RAG graph completed with non-fatal errors: %s", result.errors
+                )
+
         except Exception as e:
             logger.error("RAG orchestrator error for turn %s: %s", turn_id, e)
-
-    async def _run_retrieval_cycle(self, transcript: str, board_summary: str, turn_id: str) -> None:
-        # Rewrite query
-        query = await self.rewrite_query(transcript, board_summary, self._session_topic)
-
-        # Retrieve
-        result = await self._retrieval.retrieve(query=query, turn_id=turn_id)
-
-        # Always publish sources to frontend for viewer navigation
-        await self.publish_sources(result.context.sources, turn_id, result.context.is_general_knowledge)
-
-        # Safety net: if relevant content found, inject into agent instructions
-        # This fires even if the model skips calling search_documents directly
-        if not result.context.is_general_knowledge and result.context.context_text:
-            await self.inject_context(result.context, turn_id)
 
     # ------------------------------------------------------------------
     # Query rewriting
     # ------------------------------------------------------------------
 
-    async def rewrite_query(self, transcript: str, board_summary: str, topic: str) -> str:
+    async def rewrite_query(
+        self, transcript: str, board_summary: str, topic: str
+    ) -> str:
         """Rewrite messy speech transcript into a retrieval-optimized query."""
         try:
             from google import genai
+
             api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
             if not api_key:
                 raise RuntimeError("Gemini API key not configured")
@@ -90,7 +117,9 @@ class RAGOrchestrator:
             if board_summary:
                 context_parts.append(f"Board: {board_summary}")
             if self._recent_transcripts[:-1]:
-                context_parts.append("Recent: " + " | ".join(self._recent_transcripts[-3:-1]))
+                context_parts.append(
+                    "Recent: " + " | ".join(self._recent_transcripts[-3:-1])
+                )
 
             context_str = "\n".join(context_parts)
             prompt = (
@@ -110,7 +139,9 @@ class RAGOrchestrator:
                 timeout=_REWRITE_TIMEOUT_S,
             )
             rewritten = (response.text or "").strip()
-            logger.debug("Query rewritten: '%s' → '%s'", transcript[:60], rewritten[:60])
+            logger.debug(
+                "Query rewritten: '%s' → '%s'", transcript[:60], rewritten[:60]
+            )
             return rewritten
         except Exception as e:
             logger.warning("Query rewrite failed: %s — using raw transcript", e)
@@ -123,7 +154,11 @@ class RAGOrchestrator:
     async def inject_context(self, context: RetrievalContext, turn_id: str) -> None:
         """Update agent instructions with RAG context. Discards stale turns."""
         if turn_id != self._current_turn_id:
-            logger.debug("Discarding stale context for turn %s (current: %s)", turn_id, self._current_turn_id)
+            logger.debug(
+                "Discarding stale context for turn %s (current: %s)",
+                turn_id,
+                self._current_turn_id,
+            )
             return
 
         if context.is_general_knowledge or not context.context_text:
@@ -137,7 +172,11 @@ class RAGOrchestrator:
             )
             new_instructions = self._base_instructions + rag_section
             await self._agent.update_instructions(new_instructions)
-            logger.info("Injected RAG context for turn %s (%d sources)", turn_id, len(context.sources))
+            logger.info(
+                "Injected RAG context for turn %s (%d sources)",
+                turn_id,
+                len(context.sources),
+            )
         except Exception as e:
             logger.error("Failed to inject RAG context for turn %s: %s", turn_id, e)
 
@@ -150,16 +189,19 @@ class RAGOrchestrator:
         sources: list[SourceAttribution],
         turn_id: str,
         is_general_knowledge: bool,
+        navigate_to: dict | None = None,
     ) -> None:
         """Publish source attribution to frontend via tutor.sources LiveKit data topic."""
         try:
-            navigate_to = None
-            if sources and not is_general_knowledge:
+            # Use provided navigate_to or build from top source
+            if navigate_to is None and sources and not is_general_knowledge:
                 top = sources[0]
                 navigate_to = {
                     "doc_name": top.document_name,
                     "page_number": top.page_number,
-                    "text_excerpt": top.text_excerpt[:200] if top.text_excerpt else None,
+                    "text_excerpt": top.text_excerpt[:200]
+                    if top.text_excerpt
+                    else None,
                 }
 
             payload = {
@@ -185,10 +227,15 @@ class RAGOrchestrator:
                 reliable=True,
                 topic="tutor.sources",
             )
-            logger.info("Published %d sources, navigate_to=%s", len(sources),
-                        f"p.{navigate_to['page_number']}" if navigate_to else "none")
+            logger.info(
+                "Published %d sources, navigate_to=%s",
+                len(sources),
+                f"p.{navigate_to['page_number']}" if navigate_to else "none",
+            )
         except Exception as e:
-            logger.warning("Failed to publish sources for turn %s: %s", turn_id, e, exc_info=True)
+            logger.warning(
+                "Failed to publish sources for turn %s: %s", turn_id, e, exc_info=True
+            )
 
     # ------------------------------------------------------------------
     # Session management

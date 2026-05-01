@@ -184,7 +184,7 @@ export class SvgShapeUtil extends ShapeUtil<ISvgShape> {
     return new Rectangle2d({ width: shape.props.w, height: shape.props.h, isFilled: false });
   }
 
-  override onResize(shape: ISvgShape, info: TLResizeInfo<any>) {
+  override onResize(shape: ISvgShape, info: TLResizeInfo<ISvgShape>) {
     return resizeBox(shape, info);
   }
 

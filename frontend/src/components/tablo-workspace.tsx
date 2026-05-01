@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, prefer-const */
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -53,6 +54,7 @@ type BoardTargetRef =
   | { kind: "that" }
   | { kind: "shape_id"; shapeId: string };
 
+// 3D shape edge/face labeling structure (used by create_3d_* commands)
 type Shape3DLabels = {
   edges?: string[];
   faces?: string[];
@@ -916,7 +918,13 @@ type BoardCommand =
       rotation?: number;      // rotation in degrees, default 0
       star?: boolean;         // if true, draw a star (inner radius = radius/2.5)
       label?: string;
-    };
+    }
+  // ─── 3D Shapes (isometric projection) ────────────────────────────────────
+  | { v: number; id: string; op: "create_3d_cube";     x: number; y: number; size: number;  label?: string; edgeLabels?: string[] }
+  | { v: number; id: string; op: "create_3d_prism";    x: number; y: number; width: number; height: number; depth: number; triangular?: boolean; label?: string }
+  | { v: number; id: string; op: "create_3d_cylinder"; x: number; y: number; radius: number; height: number; label?: string }
+  | { v: number; id: string; op: "create_3d_cone";     x: number; y: number; radius: number; height: number; label?: string }
+  | { v: number; id: string; op: "create_3d_pyramid";  x: number; y: number; baseSize: number; height: number; label?: string };
 
 type Point = { x: number; y: number };
 
@@ -974,7 +982,7 @@ function createBoardState(): BoardState {
 /**
  * Get the shape type from tldraw shape
  */
-function getShapeType(shape: any): ShapeType {
+function getShapeType(shape: { type: string }): ShapeType {
   const typeMap: Record<string, ShapeType> = {
     draw: "draw",
     geo: "geo",
@@ -1404,6 +1412,7 @@ function findShapesByProperties(
   // Iterate through all shapes in board state
   for (const [shapeId, shape] of boardState.shapes) {
     // Verify shape still exists in editor
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (!editor.getShape(shapeId as any)) continue;
     
     const confidence = calculateMatchConfidence(shape, criteria);
@@ -4378,6 +4387,127 @@ function applyBoardCommand(
         });
         break;
       }
+      // ============================================
+      // 3D Shape Commands (isometric projection)
+      // ============================================
+      case "create_3d_cube": {
+        const { x: cx3, y: cy3, size, label: lbl3d, edgeLabels } = command;
+        const { faces, edges } = calculateCubeProjection(cx3, cy3, size);
+        const svgParts: string[] = [];
+        for (const face of faces) {
+          const pts = face.points.map((p) => `${(p.x - cx3).toFixed(1)},${(p.y - cy3).toFixed(1)}`).join(" ");
+          svgParts.push(`<polygon points="${pts}" fill="${face.color}" stroke="black" stroke-width="1.5" opacity="0.85"/>`);
+        }
+        for (const edge of edges) {
+          svgParts.push(`<line x1="${(edge.start.x - cx3).toFixed(1)}" y1="${(edge.start.y - cy3).toFixed(1)}" x2="${(edge.end.x - cx3).toFixed(1)}" y2="${(edge.end.y - cy3).toFixed(1)}" stroke="black" stroke-width="1.5"/>`);
+        }
+        if (lbl3d) svgParts.push(`<text x="0" y="${(size * 0.15).toFixed(1)}" text-anchor="middle" font-size="${(size * 0.18).toFixed(1)}" fill="black">${lbl3d}</text>`);
+        const pad = size * 0.15;
+        const allX = [...faces.flatMap((f) => f.points.map((p) => p.x)), ...edges.flatMap((e) => [e.start.x, e.end.x])];
+        const allY = [...faces.flatMap((f) => f.points.map((p) => p.y)), ...edges.flatMap((e) => [e.start.y, e.end.y])];
+        const minX = Math.min(...allX) - cx3 - pad, maxX = Math.max(...allX) - cx3 + pad;
+        const minY = Math.min(...allY) - cy3 - pad, maxY = Math.max(...allY) - cy3 + pad;
+        const svgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX.toFixed(1)} ${minY.toFixed(1)} ${(maxX - minX).toFixed(1)} ${(maxY - minY).toFixed(1)}">${svgParts.join("")}</svg>`;
+        const shapeId3d = createShapeId();
+        editor.createShape({ id: shapeId3d, type: "svg_shape", x: cx3 + minX, y: cy3 + minY, props: { w: maxX - minX, h: maxY - minY, svg: svgStr, color: "#1e293b" } } as any);
+        createdShapeIds.push("created");
+        break;
+      }
+
+      case "create_3d_prism": {
+        const { x: px3, y: py3, width: pw, height: ph, depth: pd, triangular, label: pl } = command;
+        const { faces, edges } = triangular
+          ? calculateTriangularPrismProjection(px3, py3, pw, ph, pd)
+          : calculatePrismProjection(px3, py3, pw, ph, pd);
+        const svgParts: string[] = [];
+        for (const face of faces) {
+          const pts = face.points.map((p) => `${(p.x - px3).toFixed(1)},${(p.y - py3).toFixed(1)}`).join(" ");
+          svgParts.push(`<polygon points="${pts}" fill="${face.color}" stroke="black" stroke-width="1.5" opacity="0.85"/>`);
+        }
+        for (const edge of edges) {
+          svgParts.push(`<line x1="${(edge.start.x - px3).toFixed(1)}" y1="${(edge.start.y - py3).toFixed(1)}" x2="${(edge.end.x - px3).toFixed(1)}" y2="${(edge.end.y - py3).toFixed(1)}" stroke="black" stroke-width="1.5"/>`);
+        }
+        if (pl) svgParts.push(`<text x="0" y="0" text-anchor="middle" font-size="14" fill="black">${pl}</text>`);
+        const allX3 = [...faces.flatMap((f) => f.points.map((p) => p.x)), ...edges.flatMap((e) => [e.start.x, e.end.x])];
+        const allY3 = [...faces.flatMap((f) => f.points.map((p) => p.y)), ...edges.flatMap((e) => [e.start.y, e.end.y])];
+        const pad3 = 10;
+        const mnX = Math.min(...allX3) - px3 - pad3, mxX = Math.max(...allX3) - px3 + pad3;
+        const mnY = Math.min(...allY3) - py3 - pad3, mxY = Math.max(...allY3) - py3 + pad3;
+        const svgStr3 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${mnX.toFixed(1)} ${mnY.toFixed(1)} ${(mxX - mnX).toFixed(1)} ${(mxY - mnY).toFixed(1)}">${svgParts.join("")}</svg>`;
+        editor.createShape({ id: createShapeId(), type: "svg_shape", x: px3 + mnX, y: py3 + mnY, props: { w: mxX - mnX, h: mxY - mnY, svg: svgStr3, color: "#1e293b" } } as any);
+        createdShapeIds.push("created");
+        break;
+      }
+
+      case "create_3d_cylinder": {
+        const { x: cylX, y: cylY, radius: cylR, height: cylH, label: cylL } = command;
+        const { faces, edges } = calculateCylinderProjection(cylX, cylY, cylR, cylH);
+        const svgParts: string[] = [];
+        for (const face of faces) {
+          const pts = face.points.map((p) => `${(p.x - cylX).toFixed(1)},${(p.y - cylY).toFixed(1)}`).join(" ");
+          svgParts.push(`<polygon points="${pts}" fill="${face.color}" stroke="black" stroke-width="1.5" opacity="0.85"/>`);
+        }
+        for (const edge of edges) {
+          svgParts.push(`<line x1="${(edge.start.x - cylX).toFixed(1)}" y1="${(edge.start.y - cylY).toFixed(1)}" x2="${(edge.end.x - cylX).toFixed(1)}" y2="${(edge.end.y - cylY).toFixed(1)}" stroke="black" stroke-width="1"/>`);
+        }
+        if (cylL) svgParts.push(`<text x="0" y="${(-cylH / 2 - 8).toFixed(1)}" text-anchor="middle" font-size="14" fill="black">${cylL}</text>`);
+        const pad4 = 12;
+        const allX4 = [...faces.flatMap((f) => f.points.map((p) => p.x))];
+        const allY4 = [...faces.flatMap((f) => f.points.map((p) => p.y))];
+        const mnX4 = Math.min(...allX4) - cylX - pad4, mxX4 = Math.max(...allX4) - cylX + pad4;
+        const mnY4 = Math.min(...allY4) - cylY - pad4, mxY4 = Math.max(...allY4) - cylY + pad4;
+        const svgStr4 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${mnX4.toFixed(1)} ${mnY4.toFixed(1)} ${(mxX4 - mnX4).toFixed(1)} ${(mxY4 - mnY4).toFixed(1)}">${svgParts.join("")}</svg>`;
+        editor.createShape({ id: createShapeId(), type: "svg_shape", x: cylX + mnX4, y: cylY + mnY4, props: { w: mxX4 - mnX4, h: mxY4 - mnY4, svg: svgStr4, color: "#1e293b" } } as any);
+        createdShapeIds.push("created");
+        break;
+      }
+
+      case "create_3d_cone": {
+        const { x: coneX, y: coneY, radius: coneR, height: coneH, label: coneL } = command;
+        const { faces, edges } = calculateConeProjection(coneX, coneY, coneR, coneH);
+        const svgParts: string[] = [];
+        for (const face of faces) {
+          const pts = face.points.map((p) => `${(p.x - coneX).toFixed(1)},${(p.y - coneY).toFixed(1)}`).join(" ");
+          svgParts.push(`<polygon points="${pts}" fill="${face.color}" stroke="black" stroke-width="1.5" opacity="0.85"/>`);
+        }
+        for (const edge of edges) {
+          svgParts.push(`<line x1="${(edge.start.x - coneX).toFixed(1)}" y1="${(edge.start.y - coneY).toFixed(1)}" x2="${(edge.end.x - coneX).toFixed(1)}" y2="${(edge.end.y - coneY).toFixed(1)}" stroke="black" stroke-width="1"/>`);
+        }
+        if (coneL) svgParts.push(`<text x="0" y="${(-coneH - 8).toFixed(1)}" text-anchor="middle" font-size="14" fill="black">${coneL}</text>`);
+        const pad5 = 12;
+        const allX5 = [...faces.flatMap((f) => f.points.map((p) => p.x))];
+        const allY5 = [...faces.flatMap((f) => f.points.map((p) => p.y))];
+        const mnX5 = Math.min(...allX5) - coneX - pad5, mxX5 = Math.max(...allX5) - coneX + pad5;
+        const mnY5 = Math.min(...allY5) - coneY - pad5, mxY5 = Math.max(...allY5) - coneY + pad5;
+        const svgStr5 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${mnX5.toFixed(1)} ${mnY5.toFixed(1)} ${(mxX5 - mnX5).toFixed(1)} ${(mxY5 - mnY5).toFixed(1)}">${svgParts.join("")}</svg>`;
+        editor.createShape({ id: createShapeId(), type: "svg_shape", x: coneX + mnX5, y: coneY + mnY5, props: { w: mxX5 - mnX5, h: mxY5 - mnY5, svg: svgStr5, color: "#1e293b" } } as any);
+        createdShapeIds.push("created");
+        break;
+      }
+
+      case "create_3d_pyramid": {
+        const { x: pyrX, y: pyrY, baseSize: pyrB, height: pyrH, label: pyrL } = command;
+        const { faces, edges } = calculatePyramidProjection(pyrX, pyrY, pyrB, pyrH);
+        const svgParts: string[] = [];
+        for (const face of faces) {
+          const pts = face.points.map((p) => `${(p.x - pyrX).toFixed(1)},${(p.y - pyrY).toFixed(1)}`).join(" ");
+          svgParts.push(`<polygon points="${pts}" fill="${face.color}" stroke="black" stroke-width="1.5" opacity="0.85"/>`);
+        }
+        for (const edge of edges) {
+          svgParts.push(`<line x1="${(edge.start.x - pyrX).toFixed(1)}" y1="${(edge.start.y - pyrY).toFixed(1)}" x2="${(edge.end.x - pyrX).toFixed(1)}" y2="${(edge.end.y - pyrY).toFixed(1)}" stroke="black" stroke-width="1.5"/>`);
+        }
+        if (pyrL) svgParts.push(`<text x="0" y="${(-pyrH - 8).toFixed(1)}" text-anchor="middle" font-size="14" fill="black">${pyrL}</text>`);
+        const pad6 = 12;
+        const allX6 = [...faces.flatMap((f) => f.points.map((p) => p.x))];
+        const allY6 = [...faces.flatMap((f) => f.points.map((p) => p.y))];
+        const mnX6 = Math.min(...allX6) - pyrX - pad6, mxX6 = Math.max(...allX6) - pyrX + pad6;
+        const mnY6 = Math.min(...allY6) - pyrY - pad6, mxY6 = Math.max(...allY6) - pyrY + pad6;
+        const svgStr6 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${mnX6.toFixed(1)} ${mnY6.toFixed(1)} ${(mxX6 - mnX6).toFixed(1)} ${(mxY6 - mnY6).toFixed(1)}">${svgParts.join("")}</svg>`;
+        editor.createShape({ id: createShapeId(), type: "svg_shape", x: pyrX + mnX6, y: pyrY + mnY6, props: { w: mxX6 - mnX6, h: mxY6 - mnY6, svg: svgStr6, color: "#1e293b" } } as any);
+        createdShapeIds.push("created");
+        break;
+      }
+
       default:
         console.warn("Unsupported board command", command);
     }
@@ -4453,39 +4583,59 @@ function BoardSnapshotPublisher({
       const pageShapeIds = [...editor.getCurrentPageShapeIds()];
       if (pageShapeIds.length === 0) return;
 
-      const imageResult = await editor.toImage(pageShapeIds, {
-        format: "png",
-        background: true,
-        padding: 16,
-        scale: 0.4, // 40% scale — keeps payload small, Gemini can still read it
-      });
+      // Try progressively lower scales until we fit under the size cap.
+      // Freehand strokes render as complex anti-aliased paths and can be
+      // large at 40% — we try 40% → 25% → 15% before giving up.
+      const scales = [0.4, 0.25, 0.15];
+      const SIZE_CAP = 60_000; // 60KB — raised from 30KB; freehand needs more room
 
-      const arrayBuffer = await imageResult.blob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
+      let bytes: Uint8Array | null = null;
+      for (const scale of scales) {
+        const imageResult = await editor.toImage(pageShapeIds, {
+          format: "png",
+          background: true,
+          padding: 16,
+          scale,
+        });
+        const buf = await imageResult.blob.arrayBuffer();
+        const candidate = new Uint8Array(buf);
+        if (candidate.length <= SIZE_CAP) {
+          bytes = candidate;
+          break;
+        }
+        console.debug(
+          `[BoardSnapshotPublisher] scale=${scale} too large (${candidate.length}B), trying smaller`
+        );
+      }
 
-      // Hard cap at 30KB to protect audio bandwidth
-      if (bytes.length > 30_000) {
-        console.debug("[BoardSnapshotPublisher] Snapshot too large, skipping:", bytes.length);
+      if (!bytes) {
+        console.debug("[BoardSnapshotPublisher] All scales exceeded cap, skipping snapshot");
         return;
       }
 
-      // Simple hash to avoid sending identical snapshots
-      const hash = bytes.length.toString() + bytes[0] + bytes[bytes.length - 1];
+      // Better hash: sample 8 bytes spread across the buffer
+      const step = Math.max(1, Math.floor(bytes.length / 8));
+      let hash = bytes.length.toString();
+      for (let i = 0; i < bytes.length; i += step) hash += bytes[i];
       if (hash === lastSnapshotHashRef.current) return;
       lastSnapshotHashRef.current = hash;
 
+      // Convert to base64 in chunks to avoid call-stack overflow on large buffers
+      const CHUNK = 8192;
       let binary = "";
-      for (let i = 0; i < bytes.length; i++) {
-        binary += String.fromCharCode(bytes[i]);
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
       }
       const b64 = btoa(binary);
 
       const payload = JSON.stringify({ type: "board.snapshot", image_b64: b64, mime: "image/png" });
-      // Use unreliable channel — snapshots are best-effort, audio takes priority
+      // Use reliable channel for snapshots — freehand strokes are the primary
+      // visual input and must not be dropped on a lossy connection.
       await room.localParticipant.publishData(
         new TextEncoder().encode(payload),
-        { reliable: false, topic: "board.snapshot" }
+        { reliable: true, topic: "board.snapshot" }
       );
+      console.debug(`[BoardSnapshotPublisher] Sent snapshot ${bytes.length}B`);
     } catch (e) {
       console.warn("[BoardSnapshotPublisher] Failed to capture/send snapshot:", e);
     }
@@ -4531,11 +4681,12 @@ function BoardSnapshotPublisher({
           // AI is speaking — send immediately so it can react mid-sentence
           void captureAndSend();
         } else {
-          // AI is silent — debounce to wait for stroke completion
+          // AI is silent — debounce to wait for stroke completion.
+          // 600ms is enough for a freehand stroke to finish without flooding.
           debounceRef.current = window.setTimeout(() => {
             void captureAndSend();
             debounceRef.current = null;
-          }, 1500);
+          }, 600);
         }
       },
       { source: "user", scope: "document" } // only user-initiated changes
@@ -4554,6 +4705,144 @@ function BoardSnapshotPublisher({
       removeStoreListener();
     };
   }, [editor, isConnected, room, captureAndSend]);
+
+  return null;
+}
+
+/**
+ * BoardContextPublisher — publishes board.delta, board.selection, board.cursor
+ * over LiveKit data topics so the agent always has live board context.
+ *
+ * board.delta   — compact shape change summary (add/update/delete), debounced 300ms
+ * board.selection — selected shape IDs, published on every selection change
+ * board.cursor  — pointer position, throttled to ~10Hz (100ms)
+ *
+ * These replace the need for the agent to poll get_board_state every turn.
+ * The agent accumulates them in _board_delta_summary, _board_selection, _board_cursor.
+ */
+function BoardContextPublisher({
+  isConnected,
+  editor,
+}: {
+  isConnected: boolean;
+  editor: Editor | null;
+}) {
+  const room = useRoomContext();
+  const deltaDebouncerRef = useRef<number | null>(null);
+  const cursorThrottleRef = useRef<number>(0);
+  const lastSelectionRef = useRef<string>("");
+
+  const publishDelta = useCallback(
+    (op: "add" | "update" | "delete", shapes: Array<{ id: string; type: string; label: string; x: number; y: number; w: number; h: number }>, shapeCount: number) => {
+      if (!isConnected) return;
+      const payload = JSON.stringify({ op, shapes, shapeCount });
+      room.localParticipant
+        .publishData(new TextEncoder().encode(payload), { reliable: false, topic: "board.delta" })
+        .catch(() => {});
+    },
+    [isConnected, room]
+  );
+
+  const publishSelection = useCallback(
+    (selectedIds: string[]) => {
+      if (!isConnected) return;
+      const key = selectedIds.sort().join(",");
+      if (key === lastSelectionRef.current) return; // deduplicate
+      lastSelectionRef.current = key;
+      const payload = JSON.stringify({ selectedIds, count: selectedIds.length });
+      room.localParticipant
+        .publishData(new TextEncoder().encode(payload), { reliable: true, topic: "board.selection" })
+        .catch(() => {});
+    },
+    [isConnected, room]
+  );
+
+  const publishCursor = useCallback(
+    (x: number, y: number) => {
+      if (!isConnected) return;
+      const now = Date.now();
+      if (now - cursorThrottleRef.current < 100) return; // 10Hz throttle
+      cursorThrottleRef.current = now;
+      const payload = JSON.stringify({ x: Math.round(x), y: Math.round(y) });
+      room.localParticipant
+        .publishData(new TextEncoder().encode(payload), { reliable: false, topic: "board.cursor" })
+        .catch(() => {});
+    },
+    [isConnected, room]
+  );
+
+  useEffect(() => {
+    if (!isConnected || !editor) return;
+
+    // Track previous shape set for delta detection
+    let prevShapeIds = new Set<string>(
+      [...editor.getCurrentPageShapeIds()].map(String)
+    );
+
+    // board.delta — debounced store listener
+    const removeStoreListener = editor.store.listen(
+      () => {
+        if (deltaDebouncerRef.current) {
+          window.clearTimeout(deltaDebouncerRef.current);
+        }
+        deltaDebouncerRef.current = window.setTimeout(() => {
+          deltaDebouncerRef.current = null;
+          const currentIds = new Set<string>(
+            [...editor.getCurrentPageShapeIds()].map(String)
+          );
+          const added = [...currentIds].filter((id) => !prevShapeIds.has(id));
+          const removed = [...prevShapeIds].filter((id) => !currentIds.has(id));
+          prevShapeIds = currentIds;
+
+          const op = removed.length > 0 && added.length === 0 ? "delete"
+            : added.length > 0 && removed.length === 0 ? "add"
+            : "update";
+
+          // Build compact shape descriptors for changed shapes
+          const changedIds = op === "delete" ? removed : added.length > 0 ? added : [...currentIds].slice(0, 5);
+          const shapes = changedIds.slice(0, 8).map((id) => {
+            const shape = editor.getShape(id as any);
+            const bounds = shape ? editor.getShapePageBounds(shape) : null;
+            return {
+              id,
+              type: shape?.type ?? "unknown",
+              label: (shape?.props as any)?.text ?? (shape?.props as any)?.richText ?? "",
+              x: Math.round(bounds?.x ?? 0),
+              y: Math.round(bounds?.y ?? 0),
+              w: Math.round(bounds?.w ?? 0),
+              h: Math.round(bounds?.h ?? 0),
+            };
+          });
+
+          publishDelta(op, shapes, currentIds.size);
+        }, 300);
+      },
+      { source: "user", scope: "document" }
+    );
+
+    // board.selection — listen to selection changes
+    const removeSelectionListener = editor.store.listen(
+      () => {
+        const selected = [...editor.getSelectedShapeIds()].map(String);
+        publishSelection(selected);
+      },
+      { source: "user", scope: "session" }
+    );
+
+    // board.cursor — poll pointer position at ~10Hz
+    const cursorInterval = window.setInterval(() => {
+      if (!editor) return;
+      const pt = editor.inputs.getCurrentPagePoint();
+      publishCursor(pt.x, pt.y);
+    }, 100);
+
+    return () => {
+      if (deltaDebouncerRef.current) window.clearTimeout(deltaDebouncerRef.current);
+      window.clearInterval(cursorInterval);
+      removeStoreListener();
+      removeSelectionListener();
+    };
+  }, [editor, isConnected, publishDelta, publishSelection, publishCursor]);
 
   return null;
 }
@@ -4642,7 +4931,7 @@ function BoardCommandBridge({
   return null;
 }
 
-export function TabloWorkspace() {
+export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
   const [editor, setEditor] = useState<Editor | null>(null);
   const targetStateRef = useRef<BoardTargetState>({
     lastPointerPagePoint: null,
@@ -4678,6 +4967,12 @@ export function TabloWorkspace() {
   } | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
 
+  // Build auth headers from the session token
+  const authHeaders = useCallback((): Record<string, string> => {
+    const token = authToken ?? sessionStorage.getItem("tablo_token");
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, [authToken]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -4686,6 +4981,7 @@ export function TabloWorkspace() {
       setErrorMessage("");
 
       try {
+        const headers = authHeaders();
         const [healthRes, sessionRes, realtimeRes] = await Promise.all([
           fetch(`${API_BASE_URL}/health`),
           fetch(`${API_BASE_URL}/session/bootstrap`),
@@ -4718,7 +5014,9 @@ export function TabloWorkspace() {
 
           // Fetch document list
           try {
-            const docsRes = await fetch(`${API_BASE_URL}/documents`);
+            const docsRes = await fetch(`${API_BASE_URL}/documents`, {
+              headers: authHeaders(),
+            });
             if (docsRes.ok) {
               const docs = await docsRes.json();
               if (!cancelled) setViewerDocuments(docs);
@@ -4826,6 +5124,7 @@ export function TabloWorkspace() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...authHeaders(),
         },
         body: JSON.stringify({
           session_id: session.session_id,
@@ -4881,6 +5180,7 @@ export function TabloWorkspace() {
     >
       <RoomAudioRenderer muted={false} />
       <BoardSnapshotPublisher isConnected={roomState === "connected"} editor={editor} />
+      <BoardContextPublisher isConnected={roomState === "connected"} editor={editor} />
       <BoardCommandBridge
         isConnected={roomState === "connected"}
         editor={editor}
@@ -4913,7 +5213,7 @@ export function TabloWorkspace() {
                 pendingLearnerContextRef.current = selection;
               }}
               onRefreshDocuments={() => {
-                fetch(`${API_BASE_URL}/documents`)
+                fetch(`${API_BASE_URL}/documents`, { headers: authHeaders() })
                   .then((r) => r.json())
                   .then(setViewerDocuments)
                   .catch(() => {});
@@ -4938,7 +5238,7 @@ export function TabloWorkspace() {
               </div>
               {roomState === "connected" ? (
                 <div className="flex items-center gap-3" data-lk-theme="default">
-                  <DocumentUploadButton />
+                  <DocumentUploadButton authHeaders={authHeaders()} />
                   <VoiceAssistantControlBar />
                   <button
                     className="rounded-full border border-rose-300/30 bg-rose-400/10 px-4 py-2 text-sm font-semibold text-rose-100"

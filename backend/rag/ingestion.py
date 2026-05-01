@@ -3,6 +3,7 @@
 Vector store: Qdrant (self-hosted or Qdrant Cloud).
 Collection per user: tablo_{user_id} or tablo_shared for single-user mode.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +12,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import uuid4
 
 from .knowledge_graph import KnowledgeGraph
@@ -19,7 +19,6 @@ from .models import (
     Chunk,
     ChunkWithEmbedding,
     ConceptNode,
-    ConceptRelationship,
     DiagramRecipe,
     IngestionResult,
     RelationType,
@@ -60,7 +59,9 @@ class ParsedDocument:
 class IngestionPipeline:
     """Offline document ingestion: parse → chunk → embed → store in Qdrant."""
 
-    def __init__(self, knowledge_graph: KnowledgeGraph, user_id: str | None = None) -> None:
+    def __init__(
+        self, knowledge_graph: KnowledgeGraph, user_id: str | None = None
+    ) -> None:
         self._kg = knowledge_graph
         self._user_id = user_id
         self._collection = vs.collection_name(user_id)
@@ -72,13 +73,17 @@ class IngestionPipeline:
             vs.ensure_collection(self._client, self._collection)
             logger.info("Qdrant ready — collection: %s", self._collection)
         except Exception as e:
-            logger.error("Failed to connect to Qdrant at %s: %s",
-                         os.getenv("QDRANT_URL", "http://localhost:6333"), e)
+            logger.error(
+                "Failed to connect to Qdrant at %s: %s",
+                os.getenv("QDRANT_URL", "http://localhost:6333"),
+                e,
+            )
             raise
 
     @staticmethod
     def _get_genai_client():
         from google import genai
+
         api_key = get_env("GOOGLE_API_KEY") or get_env("GEMINI_API_KEY")
         if not api_key:
             return None
@@ -131,19 +136,29 @@ class IngestionPipeline:
                 if page_text.strip():
                     start = char_offset
                     end = char_offset + len(page_text)
-                    pages.append(ParsedPage(
-                        page_number=page_num + 1,
-                        section_title=section_title,
-                        text=page_text,
-                        char_offset_start=start,
-                        char_offset_end=end,
-                    ))
+                    pages.append(
+                        ParsedPage(
+                            page_number=page_num + 1,
+                            section_title=section_title,
+                            text=page_text,
+                            char_offset_start=start,
+                            char_offset_end=end,
+                        )
+                    )
                     char_offset = end + 1
             except Exception as e:
-                raise ValueError(f"Failed to parse PDF '{doc_name}' at page {page_num + 1}: {e}") from e
+                raise ValueError(
+                    f"Failed to parse PDF '{doc_name}' at page {page_num + 1}: {e}"
+                ) from e
 
         pdf.close()
-        return ParsedDocument(doc_id=doc_id, doc_name=doc_name, format="pdf", pages=pages, total_chars=char_offset)
+        return ParsedDocument(
+            doc_id=doc_id,
+            doc_name=doc_name,
+            format="pdf",
+            pages=pages,
+            total_chars=char_offset,
+        )
 
     def parse_text(self, file_path: str) -> ParsedDocument:
         doc_name = os.path.basename(file_path)
@@ -168,16 +183,24 @@ class IngestionPipeline:
                 section_title = first_line
             start = char_offset
             end = char_offset + len(para)
-            pages.append(ParsedPage(
-                page_number=None,
-                section_title=section_title,
-                text=para,
-                char_offset_start=start,
-                char_offset_end=end,
-            ))
+            pages.append(
+                ParsedPage(
+                    page_number=None,
+                    section_title=section_title,
+                    text=para,
+                    char_offset_start=start,
+                    char_offset_end=end,
+                )
+            )
             char_offset = end + 2
 
-        return ParsedDocument(doc_id=doc_id, doc_name=doc_name, format="txt", pages=pages, total_chars=char_offset)
+        return ParsedDocument(
+            doc_id=doc_id,
+            doc_name=doc_name,
+            format="txt",
+            pages=pages,
+            total_chars=char_offset,
+        )
 
     # ------------------------------------------------------------------
     # Chunking
@@ -197,17 +220,19 @@ class IngestionPipeline:
                 sentence_len = len(sentence)
                 if current_len + sentence_len > _MAX_CHUNK_CHARS and current_sentences:
                     chunk_text = " ".join(current_sentences)
-                    chunks.append(Chunk(
-                        chunk_id=str(uuid4()),
-                        doc_id=parsed.doc_id,
-                        doc_name=parsed.doc_name,
-                        text=chunk_text,
-                        page_number=page.page_number,
-                        section_title=page.section_title,
-                        char_offset_start=current_offset,
-                        char_offset_end=current_offset + len(chunk_text),
-                        chunk_index=chunk_index,
-                    ))
+                    chunks.append(
+                        Chunk(
+                            chunk_id=str(uuid4()),
+                            doc_id=parsed.doc_id,
+                            doc_name=parsed.doc_name,
+                            text=chunk_text,
+                            page_number=page.page_number,
+                            section_title=page.section_title,
+                            char_offset_start=current_offset,
+                            char_offset_end=current_offset + len(chunk_text),
+                            chunk_index=chunk_index,
+                        )
+                    )
                     chunk_index += 1
                     current_offset += len(chunk_text) + 1
                     current_sentences = []
@@ -218,17 +243,19 @@ class IngestionPipeline:
             if current_sentences:
                 chunk_text = " ".join(current_sentences)
                 if len(chunk_text) >= _MIN_CHUNK_CHARS:
-                    chunks.append(Chunk(
-                        chunk_id=str(uuid4()),
-                        doc_id=parsed.doc_id,
-                        doc_name=parsed.doc_name,
-                        text=chunk_text,
-                        page_number=page.page_number,
-                        section_title=page.section_title,
-                        char_offset_start=current_offset,
-                        char_offset_end=current_offset + len(chunk_text),
-                        chunk_index=chunk_index,
-                    ))
+                    chunks.append(
+                        Chunk(
+                            chunk_id=str(uuid4()),
+                            doc_id=parsed.doc_id,
+                            doc_name=parsed.doc_name,
+                            text=chunk_text,
+                            page_number=page.page_number,
+                            section_title=page.section_title,
+                            char_offset_start=current_offset,
+                            char_offset_end=current_offset + len(chunk_text),
+                            chunk_index=chunk_index,
+                        )
+                    )
                     chunk_index += 1
 
         return chunks
@@ -241,7 +268,9 @@ class IngestionPipeline:
     # Embedding
     # ------------------------------------------------------------------
 
-    async def generate_embeddings(self, chunks: list[Chunk]) -> list[ChunkWithEmbedding]:
+    async def generate_embeddings(
+        self, chunks: list[Chunk]
+    ) -> list[ChunkWithEmbedding]:
         """Generate embeddings for all chunks concurrently.
 
         gemini-embedding-2 doesn't support true batch input, but we can run
@@ -255,14 +284,19 @@ class IngestionPipeline:
 
         async def embed_one(chunk: Chunk) -> ChunkWithEmbedding:
             async with semaphore:
-                embedding = await self._embed_text_with_retry(chunk.text, task_type="RETRIEVAL_DOCUMENT")
+                embedding = await self._embed_text_with_retry(
+                    chunk.text, task_type="RETRIEVAL_DOCUMENT"
+                )
                 return ChunkWithEmbedding(chunk=chunk, embedding=embedding)
 
         results = await asyncio.gather(*[embed_one(c) for c in chunks])
         return list(results)
 
-    async def _embed_text_with_retry(self, text: str, task_type: str, retries: int = _EMBED_RETRIES) -> list[float]:
+    async def _embed_text_with_retry(
+        self, text: str, task_type: str, retries: int = _EMBED_RETRIES
+    ) -> list[float]:
         from google.genai import types as genai_types
+
         client = self._get_genai_client()
         if client is None:
             raise RuntimeError("Gemini API key is not configured")
@@ -284,10 +318,17 @@ class IngestionPipeline:
             except Exception as e:
                 last_error = e
                 if attempt < retries:
-                    logger.warning("Embedding attempt %d failed: %s — retrying in %.1fs", attempt + 1, e, delay)
+                    logger.warning(
+                        "Embedding attempt %d failed: %s — retrying in %.1fs",
+                        attempt + 1,
+                        e,
+                        delay,
+                    )
                     await asyncio.sleep(delay)
                     delay *= 2
-        raise RuntimeError(f"Embedding failed after {retries + 1} attempts: {last_error}") from last_error
+        raise RuntimeError(
+            f"Embedding failed after {retries + 1} attempts: {last_error}"
+        ) from last_error
 
     async def embed_image(self, image_b64: str) -> list[float] | None:
         """Embed a base64 PNG image using gemini-embedding-2 multimodal capability.
@@ -296,9 +337,12 @@ class IngestionPipeline:
         """
         try:
             from google.genai import types as genai_types
+
             client = self._get_genai_client()
             if client is None:
-                logger.warning("Image embedding skipped: Gemini API key is not configured")
+                logger.warning(
+                    "Image embedding skipped: Gemini API key is not configured"
+                )
                 return None
             # gemini-embedding-2 accepts inline image parts
             image_part = genai_types.Part.from_bytes(
@@ -310,7 +354,9 @@ class IngestionPipeline:
                     client.models.embed_content,
                     model="gemini-embedding-2",
                     contents=image_part,
-                    config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+                    config=genai_types.EmbedContentConfig(
+                        task_type="RETRIEVAL_DOCUMENT"
+                    ),
                 ),
                 timeout=_EMBED_TIMEOUT_S,
             )
@@ -338,7 +384,9 @@ class IngestionPipeline:
         )
         client = self._get_genai_client()
         if client is None:
-            logger.warning("Concept extraction skipped: Gemini API key is not configured")
+            logger.warning(
+                "Concept extraction skipped: Gemini API key is not configured"
+            )
             return []
 
         delay = 1.0
@@ -359,11 +407,17 @@ class IngestionPipeline:
                 break
             except Exception as e:
                 if attempt < _CONCEPT_RETRIES:
-                    logger.warning("Concept extraction failed (attempt %d): %s — retrying", attempt + 1, e)
+                    logger.warning(
+                        "Concept extraction failed (attempt %d): %s — retrying",
+                        attempt + 1,
+                        e,
+                    )
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
-                logger.warning("Concept extraction failed: %s — continuing without concepts", e)
+                logger.warning(
+                    "Concept extraction failed: %s — continuing without concepts", e
+                )
                 return []
 
         nodes: list[ConceptNode] = []
@@ -375,8 +429,15 @@ class IngestionPipeline:
                 continue
             cid = str(uuid4())
             name_to_id[name.lower()] = cid
-            related_chunk_ids = [c.chunk_id for c in chunks if name.lower() in c.text.lower()]
-            node = ConceptNode(concept_id=cid, name=name, doc_id=chunks[0].doc_id, chunk_ids=related_chunk_ids)
+            related_chunk_ids = [
+                c.chunk_id for c in chunks if name.lower() in c.text.lower()
+            ]
+            node = ConceptNode(
+                concept_id=cid,
+                name=name,
+                doc_id=chunks[0].doc_id,
+                chunk_ids=related_chunk_ids,
+            )
             nodes.append(node)
             self._kg.add_concept(node)
 
@@ -386,7 +447,9 @@ class IngestionPipeline:
                 rel_type_str = rel.get("type", "")
                 target_id = name_to_id.get(target_name)
                 if target_id and rel_type_str in RelationType._value2member_map_:
-                    self._kg.add_relationship(node.concept_id, target_id, RelationType(rel_type_str))
+                    self._kg.add_relationship(
+                        node.concept_id, target_id, RelationType(rel_type_str)
+                    )
 
         return nodes
 
@@ -397,17 +460,24 @@ class IngestionPipeline:
     async def _extract_diagrams(self, file_path: str) -> dict[int, DiagramRecipe]:
         try:
             from .diagram_extractor import DiagramExtractor
+
             client = self._get_genai_client()
             if client is None:
-                logger.warning("Diagram extraction skipped: Gemini API key is not configured")
+                logger.warning(
+                    "Diagram extraction skipped: Gemini API key is not configured"
+                )
                 return {}
             extractor = DiagramExtractor(client)
-            return await asyncio.wait_for(extractor.extract_all(file_path), timeout=120.0)
+            return await asyncio.wait_for(
+                extractor.extract_all(file_path), timeout=120.0
+            )
         except asyncio.TimeoutError:
             logger.warning("Diagram extraction timed out — continuing without diagrams")
             return {}
         except Exception as e:
-            logger.warning("Diagram extraction failed: %s — continuing without diagrams", e)
+            logger.warning(
+                "Diagram extraction failed: %s — continuing without diagrams", e
+            )
             return {}
 
     @staticmethod
@@ -415,11 +485,13 @@ class IngestionPipeline:
         if recipe is None:
             return ""
         try:
-            return json.dumps({
-                "page_number": recipe.page_number,
-                "description": recipe.description,
-                "image_b64": recipe.image_b64 or "",
-            })
+            return json.dumps(
+                {
+                    "page_number": recipe.page_number,
+                    "description": recipe.description,
+                    "image_b64": recipe.image_b64 or "",
+                }
+            )
         except Exception as e:
             logger.error("Failed to serialise DiagramRecipe: %s", e)
             return ""
@@ -446,7 +518,9 @@ class IngestionPipeline:
                 "doc_id": c.chunk.doc_id,
                 "doc_name": c.chunk.doc_name,
                 "text": c.chunk.text,
-                "page_number": c.chunk.page_number if c.chunk.page_number is not None else -1,
+                "page_number": c.chunk.page_number
+                if c.chunk.page_number is not None
+                else -1,
                 "section_title": c.chunk.section_title or "",
                 "char_offset_start": c.chunk.char_offset_start,
                 "char_offset_end": c.chunk.char_offset_end,
@@ -462,13 +536,19 @@ class IngestionPipeline:
 
         try:
             vs.upsert_chunks(self._client, self._collection, ids, vectors, payloads)
-            logger.info("Stored %d chunks in Qdrant collection %s", len(chunks), self._collection)
+            logger.info(
+                "Stored %d chunks in Qdrant collection %s",
+                len(chunks),
+                self._collection,
+            )
         except Exception as e:
             raise RuntimeError(f"Failed to store chunks in Qdrant: {e}") from e
 
         # Also embed and store diagram images directly for multimodal retrieval
         if diagram_recipes:
-            await self._store_diagram_embeddings(diagram_recipes, chunks[0].chunk.doc_id, chunks[0].chunk.doc_name)
+            await self._store_diagram_embeddings(
+                diagram_recipes, chunks[0].chunk.doc_id, chunks[0].chunk.doc_name
+            )
 
     async def _store_diagram_embeddings(
         self,
@@ -498,10 +578,14 @@ class IngestionPipeline:
                 "is_diagram_embedding": True,
             }
             try:
-                vs.upsert_chunks(self._client, self._collection, [point_id], [embedding], [payload])
+                vs.upsert_chunks(
+                    self._client, self._collection, [point_id], [embedding], [payload]
+                )
                 logger.debug("Stored diagram embedding for page %d", page_num)
             except Exception as e:
-                logger.warning("Failed to store diagram embedding for page %d: %s", page_num, e)
+                logger.warning(
+                    "Failed to store diagram embedding for page %d: %s", page_num, e
+                )
 
     # ------------------------------------------------------------------
     # Deletion
@@ -519,16 +603,33 @@ class IngestionPipeline:
     # Supported formats
     # ------------------------------------------------------------------
 
-    _SUPPORTED_FORMATS = frozenset({
-        "pdf", "txt", "docx", "doc", "pptx", "rtf",
-        "png", "jpg", "jpeg", "webp", "heif",
-        "xlsx", "xls", "csv", "tsv", "html", "hwp",
-    })
+    _SUPPORTED_FORMATS = frozenset(
+        {
+            "pdf",
+            "txt",
+            "docx",
+            "doc",
+            "pptx",
+            "rtf",
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+            "heif",
+            "xlsx",
+            "xls",
+            "csv",
+            "tsv",
+            "html",
+            "hwp",
+        }
+    )
     _IMAGE_FORMATS = frozenset({"png", "jpg", "jpeg", "webp", "heif"})
     _DIAGRAM_FORMATS = frozenset({"pdf"}) | _IMAGE_FORMATS
 
     def _parse_by_format(self, file_path: str, ext: str) -> ParsedDocument:
         from . import parsers
+
         client = self._get_genai_client()
         if ext == "pdf":
             return self.parse_pdf(file_path)
@@ -563,7 +664,9 @@ class IngestionPipeline:
     # Orchestration
     # ------------------------------------------------------------------
 
-    async def ingest_document_fast(self, file_path: str, doc_name: str) -> IngestionResult:
+    async def ingest_document_fast(
+        self, file_path: str, doc_name: str
+    ) -> IngestionResult:
         """Phase 1: parse → chunk → embed → store. Returns quickly."""
         ext = os.path.splitext(file_path)[1].lower().lstrip(".")
         if ext not in self._SUPPORTED_FORMATS:
@@ -588,7 +691,13 @@ class IngestionPipeline:
         try:
             chunks_with_embeddings = await self.generate_embeddings(chunks)
         except RuntimeError as e:
-            return IngestionResult(doc_id=parsed.doc_id, chunk_count=0, concept_count=0, status="failed", error_message=str(e))
+            return IngestionResult(
+                doc_id=parsed.doc_id,
+                chunk_count=0,
+                concept_count=0,
+                status="failed",
+                error_message=str(e),
+            )
 
         concepts = await self.extract_concepts(chunks)
         await self.store(chunks_with_embeddings, concepts, diagram_recipes=None)
@@ -617,7 +726,9 @@ class IngestionPipeline:
             # Fetch all points for this doc
             points = vs.get_points_by_doc_id(self._client, self._collection, doc_id)
             if not points:
-                logger.warning("No points found for doc_id=%s when attaching diagrams", doc_id)
+                logger.warning(
+                    "No points found for doc_id=%s when attaching diagrams", doc_id
+                )
                 return
 
             # Update diagram_recipe payload on matching page chunks
@@ -626,15 +737,21 @@ class IngestionPipeline:
                 page_num = pt["payload"].get("page_number", -1)
                 recipe = diagram_recipes.get(page_num) if page_num != -1 else None
                 if recipe:
-                    updates.append((pt["id"], {"diagram_recipe": self._serialise_recipe(recipe)}))
+                    updates.append(
+                        (pt["id"], {"diagram_recipe": self._serialise_recipe(recipe)})
+                    )
 
             if updates:
                 vs.update_payloads(self._client, self._collection, updates)
-                logger.info("Attached %d diagram recipes for doc_id=%s", len(updates), doc_id)
+                logger.info(
+                    "Attached %d diagram recipes for doc_id=%s", len(updates), doc_id
+                )
 
             # Also store diagram image embeddings
             doc_name = points[0]["payload"].get("doc_name", "") if points else ""
             await self._store_diagram_embeddings(diagram_recipes, doc_id, doc_name)
 
         except Exception as e:
-            logger.error("Background diagram extraction failed for doc_id=%s: %s", doc_id, e)
+            logger.error(
+                "Background diagram extraction failed for doc_id=%s: %s", doc_id, e
+            )

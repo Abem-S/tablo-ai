@@ -131,6 +131,7 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 - **`backend/rag/ingestion.py`** — two-phase ingestion: fast text chunking + background diagram extraction. Diagram page images embedded directly via `gemini-embedding-2` multimodal alongside text chunks.
 - **`backend/rag/retrieval.py`** — hybrid vector + knowledge graph search with RRF reranking. Threshold 0.1 (Qdrant cosine scores differ from ChromaDB distances).
 - **`backend/rag/orchestrator.py`** — warm-path orchestrator triggered on `user_speech_committed`. Publishes sources to frontend via `tutor.sources`. Does NOT call `update_instructions` — RAG context flows through the `search_documents` tool only.
+- **`backend/rag/langgraph_orchestrator.py`** — LangGraph-based orchestration layer (in progress).
 - **Embedding model:** `gemini-embedding-2` (multimodal, 3072-dim)
 - **Generation model:** `gemini-2.5-flash` for concept extraction, query rewriting, context compression, diagram command generation
 
@@ -205,10 +206,10 @@ When making changes:
 The test suite lives in `backend/tests/`. Run before committing changes.
 
 ```bash
-# Fast (no drawing, ~35s)
+# Fast test suite (no drawing, ~35s, no external deps)
 cd backend && python tests/run_all.py --no-drawing
 
-# Full suite including drawing quality tests
+# Full suite including AI drawing quality tests (requires Gemini API)
 cd backend && python tests/run_all.py
 
 # Individual suites
@@ -220,6 +221,25 @@ python tests/test_rag.py             # RAG pipeline (requires Qdrant + Gemini AP
 python tests/test_drawing.py         # drawing quality (requires Gemini API)
 python tests/test_agent_behavior.py  # tool call rate, board vision, Socratic quality
 ```
+
+#### Authentication (OSS Single-Player Mode)
+
+- `TABLO_ADMIN_PASSWORD` in `.env` enables password protection
+- Lock screen at `/` requires password login
+- All API endpoints require `Authorization: Bearer <token>`
+- Session token valid for 30 days
+- User ID always `"local_admin"` in OSS mode (fixes Qdrant isolation)
+
+#### MCP Tool Layer
+
+- `backend/mcp_tools.py` exposes agent tools in MCP wire format
+- Endpoints: `GET /mcp/tools` (list), `POST /mcp/tools/call` (execute)
+- External clients (Claude Desktop, Cursor) can call Tablo tools
+
+#### Error Boundaries & Lock Screen
+
+- `frontend/src/components/error-boundary.tsx` — catches React render crashes, shows recovery UI
+- `frontend/src/components/lock-screen.tsx` — password login overlay for OSS deployment
 
 ### Current Results (as of last run)
 
@@ -238,7 +258,9 @@ python tests/test_agent_behavior.py  # tool call rate, board vision, Socratic qu
 
 ### Known Blocker
 
-`agent/concurrent_qdrant` fails because all users share `tablo_shared` — no user isolation without auth. This is expected and documented. Fix: implement auth, then wire `user_id` through to `IngestionPipeline(user_id=...)` and `RetrievalPipeline(user_id=...)`.
+`agent/concurrent_qdrant` may fail in open-source mode because all users share data. This is expected — user isolation requires a full auth system with real user IDs.
+
+As a solo founder, the single-player auth (password + `local_admin` user_id) is sufficient for personal use. For multi-user deployment, implement authentication and wire `user_id` through to `IngestionPipeline(user_id=...)` and `RetrievalPipeline(user_id=...)`.
 
 ### What Tests Don't Cover (manual testing required)
 

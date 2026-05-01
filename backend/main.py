@@ -5,9 +5,15 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from dotenv import load_dotenv
-load_dotenv()
-
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+    Depends,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -19,6 +25,16 @@ from rag.knowledge_graph import KnowledgeGraph
 from learner_memory import load_profile, save_profile, apply_update
 from config import get_env
 from observability import init_tracing, record_http_metrics
+from mcp_tools import mcp_list_tools_response, mcp_call_tool_response
+from auth import (
+    verify_admin_password,
+    create_session_token,
+    get_current_user,
+    is_auth_enabled,
+    LOCAL_ADMIN_USER_ID,
+)
+
+load_dotenv()
 
 _UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "data", "uploads")
 os.makedirs(_UPLOADS_DIR, exist_ok=True)
@@ -28,6 +44,26 @@ os.makedirs(_UPLOADS_DIR, exist_ok=True)
 _kg = KnowledgeGraph()
 _kg.load()
 _ingestion = IngestionPipeline(knowledge_graph=_kg, user_id=None)
+
+# Per-user ingestion pipeline cache — keyed by user_id
+# In OSS mode this always has one entry: "local_admin"
+_ingestion_cache: dict[str, IngestionPipeline] = {}
+_ingestion_cache[LOCAL_ADMIN_USER_ID] = _ingestion  # reuse the shared instance
+
+# In-memory ingestion status cache — keyed by doc_id
+# Tracks background ingestion progress so the frontend can poll
+_ingestion_status: dict[str, dict] = {}
+
+
+def _get_ingestion(user_id: str) -> IngestionPipeline:
+    """Get or create a per-user IngestionPipeline."""
+    if user_id not in _ingestion_cache:
+        kg = KnowledgeGraph()
+        kg.load()
+        _ingestion_cache[user_id] = IngestionPipeline(
+            knowledge_graph=kg, user_id=user_id
+        )
+    return _ingestion_cache[user_id]
 
 
 app = FastAPI(
@@ -121,6 +157,47 @@ def health() -> dict[str, str]:
         except Exception as e:
             status["qdrant"] = f"error: {e}"
     return status
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user_id: str
+    auth_enabled: bool
+
+
+@app.get("/auth/status")
+def auth_status() -> dict:
+    """Check if authentication is enabled on this instance."""
+    return {"auth_enabled": is_auth_enabled()}
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+def login(payload: LoginRequest) -> LoginResponse:
+    """Authenticate with the admin password and receive a session token.
+
+    The token is valid for 30 days. Include it in subsequent requests as:
+      Authorization: Bearer <token>
+    """
+    if not verify_admin_password(payload.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect password.",
+        )
+    token = create_session_token()
+    return LoginResponse(
+        token=token,
+        user_id=LOCAL_ADMIN_USER_ID,
+        auth_enabled=is_auth_enabled(),
+    )
 
 
 @app.get("/metrics")
@@ -228,11 +305,16 @@ async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
 
     try:
         from livekit import api
+
         async with api.LiveKitAPI(livekit_url, api_key, api_secret) as livekit_api:
             # Check if an agent is already dispatched to this room
             try:
-                dispatches = await livekit_api.agent_dispatch.list_dispatch(room=room_name)
-                already_dispatched = any(d.agent_name == "tablo-assistant" for d in dispatches.items)
+                dispatches = await livekit_api.agent_dispatch.list_dispatch(
+                    room=room_name
+                )
+                already_dispatched = any(
+                    d.agent_name == "tablo-assistant" for d in dispatches.items
+                )
             except Exception:
                 already_dispatched = False
 
@@ -262,6 +344,7 @@ async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
 # Document management endpoints (RAG source material)
 # ---------------------------------------------------------------------------
 
+
 class DocumentMetadataResponse(BaseModel):
     doc_id: str
     name: str
@@ -282,6 +365,7 @@ class IngestionResponse(BaseModel):
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user),
 ) -> IngestionResponse:
     """Upload a document and trigger the ingestion pipeline.
 
@@ -291,8 +375,12 @@ async def upload_document(
     """
     filename = file.filename or "document"
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
-    if ext not in _ingestion._SUPPORTED_FORMATS:
-        supported = ", ".join(sorted(_ingestion._SUPPORTED_FORMATS))
+
+    # Get or create per-user ingestion pipeline
+    ingestion = _get_ingestion(user_id)
+
+    if ext not in ingestion._SUPPORTED_FORMATS:
+        supported = ", ".join(sorted(ingestion._SUPPORTED_FORMATS))
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported format '{ext}'. Supported: {supported}",
@@ -305,21 +393,56 @@ async def upload_document(
         with open(save_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}") from e
+        raise HTTPException(
+            status_code=500, detail=f"Failed to save upload: {e}"
+        ) from e
 
     # Run full ingestion in background — student doesn't wait
     async def _ingest_and_extract():
         try:
-            result = await _ingestion.ingest_document_fast(file_path=save_path, doc_name=filename)
-            if result.status == "complete" and ext in _ingestion._DIAGRAM_FORMATS:
-                await _ingestion.extract_and_attach_diagrams(file_path=save_path, doc_id=result.doc_id)
+            result = await ingestion.ingest_document_fast(
+                file_path=save_path, doc_name=filename
+            )
+            if result.status == "complete" and ext in ingestion._DIAGRAM_FORMATS:
+                await ingestion.extract_and_attach_diagrams(
+                    file_path=save_path, doc_id=result.doc_id
+                )
+            # Update ingestion status cache
+            _ingestion_status[doc_id] = {
+                "doc_id": doc_id,
+                "status": result.status,
+                "chunk_count": result.chunk_count,
+                "concept_count": result.concept_count,
+                "diagram_count": result.diagram_count,
+                "error_message": result.error_message,
+            }
         except Exception as e:
-            import logging
-            logging.getLogger("tablo.upload").error("Background ingestion failed for %s: %s", filename, e)
+            import logging as _logging
+
+            _logging.getLogger("tablo.upload").error(
+                "Background ingestion failed for %s: %s", filename, e
+            )
+            _ingestion_status[doc_id] = {
+                "doc_id": doc_id,
+                "status": "failed",
+                "chunk_count": 0,
+                "concept_count": 0,
+                "diagram_count": 0,
+                "error_message": str(e),
+            }
 
     background_tasks.add_task(_ingest_and_extract)
 
-    # Return immediately — doc_id is the uuid prefix we generated
+    # Mark as processing immediately
+    _ingestion_status[doc_id] = {
+        "doc_id": doc_id,
+        "status": "processing",
+        "chunk_count": 0,
+        "concept_count": 0,
+        "diagram_count": 0,
+        "error_message": None,
+    }
+
     return IngestionResponse(
         doc_id=doc_id,
         name=filename,
@@ -331,10 +454,39 @@ async def upload_document(
     )
 
 
+@app.get("/documents/{doc_id}/status")
+def get_ingestion_status(doc_id: str, user_id: str = Depends(get_current_user)) -> dict:
+    """Poll ingestion status for a document.
+
+    Returns: { doc_id, status: "processing"|"complete"|"failed",
+               chunk_count, concept_count, diagram_count, error_message }
+    """
+    if doc_id in _ingestion_status:
+        return _ingestion_status[doc_id]
+    # Not in cache — check if it exists in Qdrant (already completed before restart)
+    ingestion = _get_ingestion(user_id)
+    from rag.vector_store import get_points_by_doc_id
+
+    points = get_points_by_doc_id(ingestion._client, ingestion._collection, doc_id)
+    if points:
+        return {
+            "doc_id": doc_id,
+            "status": "complete",
+            "chunk_count": len(points),
+            "concept_count": 0,
+            "diagram_count": 0,
+            "error_message": None,
+        }
+    raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+
+
 @app.get("/documents", response_model=list[DocumentMetadataResponse])
-def list_documents() -> list[DocumentMetadataResponse]:
-    """List all ingested documents."""
-    docs = _ingestion.list_documents()
+def list_documents(
+    user_id: str = Depends(get_current_user),
+) -> list[DocumentMetadataResponse]:
+    """List all ingested documents for the current user."""
+    ingestion = _get_ingestion(user_id)
+    docs = ingestion.list_documents()
     return [
         DocumentMetadataResponse(
             doc_id=d["doc_id"],
@@ -346,19 +498,29 @@ def list_documents() -> list[DocumentMetadataResponse]:
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: str) -> dict[str, str]:
+def delete_document(
+    doc_id: str, user_id: str = Depends(get_current_user)
+) -> dict[str, str]:
     """Delete an ingested document and remove its chunks and concepts."""
-    removed = _ingestion.delete_document(doc_id)
+    ingestion = _get_ingestion(user_id)
+    removed = ingestion.delete_document(doc_id)
     if removed == 0:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+    _ingestion_status.pop(doc_id, None)
     return {"status": "deleted", "doc_id": doc_id, "chunks_removed": str(removed)}
 
 
 @app.post("/documents/{doc_id}/extract-diagrams")
-async def extract_diagrams(doc_id: str, background_tasks: BackgroundTasks) -> dict[str, str]:
+async def extract_diagrams(
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_current_user),
+) -> dict[str, str]:
     """Trigger diagram extraction for an already-ingested document."""
     from rag.vector_store import get_points_by_doc_id
-    points = get_points_by_doc_id(_ingestion._client, _ingestion._collection, doc_id)
+
+    ingestion = _get_ingestion(user_id)
+    points = get_points_by_doc_id(ingestion._client, ingestion._collection, doc_id)
     if not points:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
@@ -366,10 +528,14 @@ async def extract_diagrams(doc_id: str, background_tasks: BackgroundTasks) -> di
     upload_files = os.listdir(_UPLOADS_DIR)
     matching = [f for f in upload_files if doc_name in f]
     if not matching:
-        raise HTTPException(status_code=404, detail=f"Upload file for '{doc_name}' not found on disk")
+        raise HTTPException(
+            status_code=404, detail=f"Upload file for '{doc_name}' not found on disk"
+        )
 
     file_path = os.path.join(_UPLOADS_DIR, matching[0])
-    background_tasks.add_task(_ingestion.extract_and_attach_diagrams, file_path=file_path, doc_id=doc_id)
+    background_tasks.add_task(
+        ingestion.extract_and_attach_diagrams, file_path=file_path, doc_id=doc_id
+    )
     return {"status": "extraction_started", "doc_id": doc_id, "file": matching[0]}
 
 
@@ -395,10 +561,14 @@ _MIME_TYPES = {
 }
 
 
-def _find_upload_file(doc_id: str) -> tuple[str, str]:
+def _find_upload_file(
+    doc_id: str, user_id: str = LOCAL_ADMIN_USER_ID
+) -> tuple[str, str]:
     """Find the uploaded file path for a doc_id. Returns (file_path, doc_name)."""
     from rag.vector_store import get_points_by_doc_id
-    points = get_points_by_doc_id(_ingestion._client, _ingestion._collection, doc_id)
+
+    ingestion = _get_ingestion(user_id)
+    points = get_points_by_doc_id(ingestion._client, ingestion._collection, doc_id)
     if not points:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
@@ -406,7 +576,9 @@ def _find_upload_file(doc_id: str) -> tuple[str, str]:
     upload_files = os.listdir(_UPLOADS_DIR)
     matching = [f for f in upload_files if doc_name in f]
     if not matching:
-        raise HTTPException(status_code=404, detail=f"Upload file for '{doc_name}' not found on disk")
+        raise HTTPException(
+            status_code=404, detail=f"Upload file for '{doc_name}' not found on disk"
+        )
 
     file_path = os.path.join(_UPLOADS_DIR, matching[0])
     real_path = os.path.realpath(file_path)
@@ -418,19 +590,21 @@ def _find_upload_file(doc_id: str) -> tuple[str, str]:
 
 
 @app.get("/documents/{doc_id}/file")
-def get_document_file(doc_id: str):
+def get_document_file(doc_id: str, user_id: str = Depends(get_current_user)):
     """Serve the original uploaded file for client-side rendering."""
-    file_path, doc_name = _find_upload_file(doc_id)
+    file_path, doc_name = _find_upload_file(doc_id, user_id)
     ext = os.path.splitext(doc_name)[1].lower().lstrip(".")
     media_type = _MIME_TYPES.get(ext, "application/octet-stream")
     return FileResponse(file_path, media_type=media_type, filename=doc_name)
 
 
 @app.get("/documents/{doc_id}/text")
-def get_document_text(doc_id: str) -> dict:
+def get_document_text(doc_id: str, user_id: str = Depends(get_current_user)) -> dict:
     """Return extracted plain text for formats that need server-side text extraction."""
     from rag.vector_store import get_points_by_doc_id
-    points = get_points_by_doc_id(_ingestion._client, _ingestion._collection, doc_id)
+
+    ingestion = _get_ingestion(user_id)
+    points = get_points_by_doc_id(ingestion._client, ingestion._collection, doc_id)
     if not points:
         raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
 
@@ -447,6 +621,7 @@ def get_document_text(doc_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Learner profile endpoints
 # ---------------------------------------------------------------------------
+
 
 class LearnerProfileResponse(BaseModel):
     learner_id: str
@@ -492,7 +667,36 @@ def patch_learner_profile(learner_id: str, update: dict) -> dict:
 def reset_learner_profile(learner_id: str) -> dict:
     """Reset a learner profile to defaults."""
     from learner_memory import _profile_path
+
     path = _profile_path(learner_id)
     if os.path.exists(path):
         os.remove(path)
     return {"status": "reset", "learner_id": learner_id}
+
+
+# ---------------------------------------------------------------------------
+# MCP Tool Layer endpoints
+# Exposes the agent's tools in MCP wire format so external clients
+# (Claude Desktop, Cursor, etc.) can discover and call them.
+# ---------------------------------------------------------------------------
+
+
+class MCPCallRequest(BaseModel):
+    name: str
+    arguments: dict = {}
+
+
+@app.get("/mcp/tools")
+def mcp_list_tools() -> dict:
+    """List all available MCP tools with their schemas."""
+    return mcp_list_tools_response()
+
+
+@app.post("/mcp/tools/call")
+async def mcp_call_tool(request: MCPCallRequest) -> dict:
+    """Call an MCP tool by name with the given arguments.
+
+    Returns the MCP call_tool response payload:
+    { content: [{type: "text", text: "..."}], isError: bool }
+    """
+    return await mcp_call_tool_response(request.name, request.arguments)

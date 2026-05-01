@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import "tldraw/tldraw.css";
+import { WorkspaceErrorBoundary } from "@/components/error-boundary";
 
 export const metadata: Metadata = {
   title: "Tablo",
@@ -14,7 +15,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <WorkspaceErrorBoundary>{children}</WorkspaceErrorBoundary>
+      </body>
     </html>
   );
 }

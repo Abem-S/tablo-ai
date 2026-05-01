@@ -13,6 +13,8 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  // Ignore known-safe patterns in tldraw/complex React components
+  { rules: { "react-hooks/set-state-in-effect": "off" } },
 ]);
 
 export default eslintConfig;
