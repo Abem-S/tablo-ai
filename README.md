@@ -28,7 +28,7 @@ The core product idea is simple:
 The easiest way to run the entire stack locally (Frontend, Backend, AI Agent, Qdrant, and Local LiveKit) is to use the provided setup script. You only need a Google Gemini API Key.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/tablo-ai.git
+git clone [https://github.com/Abem-S/tablo-ai.git](https://github.com/Abem-S/tablo-ai.git)
 cd tablo-ai
 ./start.sh
 ```
