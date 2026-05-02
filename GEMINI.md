@@ -177,39 +177,33 @@ python tests/test_compression.py       # RAG compression only
 
 ---
 
-## Building and Running
+## Building and Running (Local Quickstart)
 
 ### Prerequisites
-- Docker (for Qdrant)
-- Python 3.12+
-- Node.js 20+
+- Docker & Docker Compose
+- A Google Gemini API Key
 
-### Backend
+### Easy Start (Recommended)
+We've provided a simple startup script that handles the `.env` generation and spins up the entire stack using Docker (Frontend, Backend, AI Agent, Qdrant, and Local LiveKit).
+
 ```bash
-# 1. Start Qdrant
-docker compose up qdrant -d
-
-# 2. Create backend/.env
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=your-api-key
-LIVEKIT_API_SECRET=your-api-secret
-GOOGLE_API_KEY=your-gemini-api-key
-QDRANT_URL=http://localhost:6333
-
-# 3. Install and run
-cd backend
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload        # FastAPI
-python agent.py dev              # Agent worker (separate terminal)
+# Run the setup script
+./start.sh
 ```
 
-### Frontend
-```bash
-cd frontend
-npm install
-npm run dev
-```
+**What this does:**
+1. Prompts for your `GOOGLE_API_KEY` and creates a root `.env` file.
+2. Creates `livekit.yaml` with default dev keys.
+3. Runs `docker compose up -d --build`.
+4. Starts the Frontend on `http://localhost:3000`.
+
+### Manual Start
+If you prefer not to use Docker for the backend/frontend, you can run services individually:
+1. `docker compose up qdrant -d`
+2. Configure `.env` in the root folder.
+3. Run FastAPI: `cd backend && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt && uvicorn main:app --reload`
+4. Run Agent: `cd backend && python agent.py dev`
+5. Run Frontend: `cd frontend && npm install && npm run dev`
 
 ---
 

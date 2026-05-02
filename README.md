@@ -23,6 +23,19 @@ The core product idea is simple:
 
 **the AI should not just answer on top of the board, it should think with the learner on the board.**
 
+## 🚀 Quick Start (Local Docker)
+
+The easiest way to run the entire stack locally (Frontend, Backend, AI Agent, Qdrant, and Local LiveKit) is to use the provided setup script. You only need a Google Gemini API Key.
+
+```bash
+git clone https://github.com/YOUR-USERNAME/tablo-ai.git
+cd tablo-ai
+./start.sh
+```
+The script will prompt for your API key, generate the `.env` files, and spin everything up via Docker Compose. Once running, open `http://localhost:3000` in your browser.
+
+---
+
 ## 🛠️ The 2026 Tech Stack
 
 - **Frontend:** Next.js 16 (App Router), React 19, Tailwind 4, `tldraw`
@@ -755,7 +768,7 @@ All `os.getenv()` calls for secrets replaced with `get_env()` throughout the cod
 - `qdrant_restore.py` — restore from snapshot
 - `qdrant_migrate.py` — migrate data between collections
 
-### Week 2: Socratic Interaction and Live Tutor Layer
+### Week 2: Socratic Interaction and Live Tutor Layer ✅ Shipped
 
 **Goal:** make the product behave like a tutor, not just an interface.
 
@@ -767,7 +780,7 @@ All `os.getenv()` calls for secrets replaced with `get_env()` throughout the cod
 
 **End of week result:** Tablo can guide the learner in a board-aware, pedagogically coherent way.
 
-### Week 3: Retrieval, Tools, and Grounding
+### Week 3: Retrieval, Tools, and Grounding ✅ Shipped
 
 **Goal:** make the tutor trustworthy and context-rich.
 
@@ -779,7 +792,7 @@ All `os.getenv()` calls for secrets replaced with `get_env()` throughout the cod
 
 **End of week result:** Tablo can answer with source-backed context and tool-assisted reasoning.
 
-### Week 4: Memory, Voice Completion, and Demo Readiness
+### Week 4: Memory, Voice Completion, and Demo Readiness ✅ Shipped
 
 **Goal:** bring continuity and polish to the full experience.
 

@@ -152,7 +152,7 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 - **`backend/rag/ingestion.py`** — two-phase ingestion: fast text chunking + background diagram extraction. Diagram page images embedded directly via `gemini-embedding-2` multimodal alongside text chunks.
 - **`backend/rag/retrieval.py`** — hybrid vector + knowledge graph search with RRF reranking. Threshold 0.1 (Qdrant cosine scores differ from ChromaDB distances).
 - **`backend/rag/orchestrator.py`** — warm-path orchestrator triggered on `user_speech_committed`. Publishes sources to frontend via `tutor.sources`. Does NOT call `update_instructions` — RAG context flows through the `search_documents` tool only.
-- **`backend/rag/langgraph_orchestrator.py`** — LangGraph-based orchestration layer (in progress).
+- **`backend/rag/langgraph_orchestrator.py`** — LangGraph-based orchestration layer (fully implemented).
 - **Embedding model:** `gemini-embedding-2` (multimodal, 3072-dim)
 - **Generation model:** `gemini-2.5-flash` for concept extraction, query rewriting, context compression, diagram command generation
 

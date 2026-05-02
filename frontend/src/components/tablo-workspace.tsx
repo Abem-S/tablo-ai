@@ -5514,7 +5514,7 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
 
         </section>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 md:px-6 md:pb-6">
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-6 md:px-6 md:pb-8 flex flex-col items-center justify-end">
           {/* Source transparency panel — only shown when connected */}
           {roomState === "connected" && (
             <SourcePanel
@@ -5522,61 +5522,107 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
               isGeneralKnowledge={ragIsGeneralKnowledge}
             />
           )}
-          <div className="pointer-events-auto mx-auto max-w-xl rounded-[30px] border border-white/10 bg-slate-950/70 px-4 py-3 shadow-[0_24px_80px_rgba(3,8,20,0.45)] backdrop-blur">
-            <div className="flex items-center justify-between gap-4">
-              <div className="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs text-slate-300">
+          
+          <div className="pointer-events-auto relative mt-4">
+            {/* Floating Board Status Pill */}
+            {roomState === "connected" && (
+              <div className="absolute -top-12 left-1/2 -translate-x-1/2 rounded-full border border-white/10 bg-[#1A2F4B]/80 px-4 py-1.5 text-xs font-medium text-slate-200 backdrop-blur-md shadow-lg flex items-center gap-2 whitespace-nowrap transition-all duration-300 hover:bg-[#1A2F4B]">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#EF7060] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#EF7060]"></span>
+                </span>
                 {boardMetrics.summary}
               </div>
+            )}
+
+            {/* Main Control Bar */}
+            <div className="mx-auto flex w-max max-w-full items-center gap-4 rounded-2xl border border-white/10 bg-[#1A2F4B]/85 px-4 py-3 shadow-[0_16px_40px_rgba(0,0,0,0.4)] backdrop-blur-xl transition-all duration-300">
               {roomState === "connected" ? (
                 <div className="flex items-center gap-3" data-lk-theme="default">
+                  
                   {/* Session Selector */}
-                  <select
-                    className="rounded-lg border border-[#1A2F4B]/30 bg-[#FCF8F3] px-3 py-1.5 text-xs text-[#0F172A] font-medium"
-                    value={currentSessionId || ""}
-                    onChange={(e) => handleSessionChange(e.target.value)}
-                    style={{ backgroundColor: '#FCF8F3', color: '#0F172A' }}
-                  >
-                    {sessions.map((s) => (
-                      <option key={s.id} value={s.id} style={{ backgroundColor: '#FCF8F3', color: '#0F172A' }}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex flex-col">
+                    <span className="text-[9px] font-bold tracking-wider text-[#FCF8F3]/60 uppercase px-1 mb-0.5">Session</span>
+                    <select
+                      className="appearance-none rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 pr-8 text-sm font-medium text-[#FCF8F3] transition-colors hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-[#EF7060]/50"
+                      value={currentSessionId || ""}
+                      onChange={(e) => handleSessionChange(e.target.value)}
+                      style={{ 
+                        backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23FCF8F3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, 
+                        backgroundRepeat: 'no-repeat', 
+                        backgroundPosition: 'right 0.6rem center', 
+                        backgroundSize: '1em' 
+                      }}
+                    >
+                      {sessions.map((s) => (
+                        <option key={s.id} value={s.id} className="bg-[#1A2F4B] text-[#FCF8F3]">
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="h-8 w-px bg-white/10 mx-1"></div>
+
+                  {/* New Topic Button */}
                   <button
-                    className="rounded-full border border-[#EF7060]/30 bg-[#EF7060]/10 px-3 py-1.5 text-xs font-semibold text-[#EF7060]"
+                    className="group relative flex items-center justify-center rounded-lg bg-white/5 p-2 text-[#EF7060] transition-all hover:bg-[#EF7060] hover:text-white"
                     onClick={handleCreateNewSession}
                     type="button"
-                    title="Create new session"
+                    title="Create new topic"
                   >
-                    + New Topic
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="12" y1="5" x2="12" y2="19"></line>
+                      <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
                   </button>
-                  <DocumentUploadButton authHeaders={authHeaders()} sessionId={currentSessionId} />
-                  <VoiceAssistantControlBar />
-                  <button
-                    className="rounded-full border border-[#1A2F4B]/30 bg-[#1A2F4B] px-4 py-2 text-sm font-semibold text-white"
-                    onClick={disconnectLiveKit}
-                    type="button"
-                    style={{ backgroundColor: '#1A2F4B' }}
-                  >
-                    End Chat
-                  </button>
+
+                  {/* Upload Document Button */}
+                  <div className="flex items-center">
+                    <DocumentUploadButton authHeaders={authHeaders()} sessionId={currentSessionId} />
+                  </div>
+
+                  <div className="h-8 w-px bg-white/10 mx-1"></div>
+
+                  {/* LiveKit Controls Wrapper */}
+                  {/* We use Tailwind arbitrary selectors to override LiveKit's default styles */}
+                  <div className="flex items-center rounded-xl bg-black/30 p-1 pl-2 [&_.lk-control-bar]:!bg-transparent [&_.lk-control-bar]:!border-none [&_.lk-control-bar]:!shadow-none [&_.lk-button]:!bg-transparent [&_.lk-button]:hover:!bg-white/10 [&_.lk-disconnect-button]:!bg-[#EF7060] [&_.lk-disconnect-button]:hover:!bg-[#d95d4e] [&_.lk-disconnect-button]:!border-none [&_.lk-disconnect-button]:!rounded-lg [&_.lk-disconnect-button]:!ml-2 [&_.lk-audio-visualizer]:!opacity-80">
+                    <VoiceAssistantControlBar />
+                  </div>
+
                 </div>
               ) : (
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-6 px-2">
                   {/* Tablo Logo */}
                   <img 
                     src="/tablo.webp" 
                     alt="Tablo" 
-                    style={{ height: '32px', width: 'auto', objectFit: 'contain' }}
+                    className="h-9 w-auto object-contain drop-shadow-md"
                   />
                   <button
-                    className="rounded-full border border-[#EF7060] bg-[#EF7060] px-6 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 shadow-lg"
+                    className="group relative flex items-center gap-2 rounded-full bg-gradient-to-r from-[#EF7060] to-[#f28b7e] px-8 py-3 text-sm font-bold text-white shadow-[0_0_20px_rgba(239,112,96,0.3)] transition-all hover:scale-105 hover:shadow-[0_0_30px_rgba(239,112,96,0.5)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100"
                     disabled={roomState === "connecting"}
                     onClick={connectLiveKit}
                     type="button"
-                    style={{ backgroundColor: '#EF7060', borderColor: '#EF7060' }}
                   >
-                    {roomState === "connecting" ? "Connecting..." : "🎙️ Talk to Tablo"}
+                    {roomState === "connecting" ? (
+                      <span className="flex items-center gap-2">
+                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Connecting...
+                      </span>
+                    ) : (
+                      <>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                          <line x1="12" y1="19" x2="12" y2="22"></line>
+                        </svg>
+                        Talk to Tablo
+                      </>
+                    )}
                   </button>
                 </div>
               )}

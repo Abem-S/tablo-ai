@@ -47,8 +47,6 @@ services:
     volumes:
       - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
     restart: unless-stopped
-    profiles:
-      - livekit  # only starts with: docker compose --profile livekit up
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7880/"]
       interval: 10s
@@ -64,7 +62,7 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./backend/.env
+      - ./.env
     environment:
       - QDRANT_URL=http://qdrant:6333
     volumes:
@@ -112,7 +110,7 @@ services:
     container_name: tablo-agent
     command: python agent.py dev
     env_file:
-      - ./backend/.env
+      - ./.env
     environment:
       - QDRANT_URL=http://qdrant:6333
       - AGENT_METRICS_ENABLED=true
@@ -124,8 +122,20 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
-    profiles:
-      - agent
+
+  # ── Frontend Next.js app ───────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: tablo-frontend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./.env
+    depends_on:
+      - backend
+    restart: unless-stopped
 
   # ── Production agent worker (profile: prod) ──────────────────────────────
   agent-prod:
