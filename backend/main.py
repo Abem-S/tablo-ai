@@ -374,7 +374,9 @@ class IngestionResponse(BaseModel):
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    session_id: str | None = Query(default=None, description="Optional session ID to add doc to"),
+    session_id: str | None = Query(
+        default=None, description="Optional session ID to add doc to"
+    ),
     user_id: str = Depends(get_current_user),
 ) -> IngestionResponse:
     """Upload a document and trigger the ingestion pipeline.
@@ -382,7 +384,7 @@ async def upload_document(
     Returns immediately with status='processing'. Ingestion (parse → chunk → embed)
     runs in the background so the student can start talking right away.
     The document becomes searchable once ingestion completes (~5-30s depending on size).
-    
+
     Optionally specify session_id to auto-add document to that session.
     """
     filename = file.filename or "document"
@@ -620,7 +622,7 @@ def delete_session_endpoint(
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     if session.get("learner_id") != user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
+
     deleted = delete_session(session_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
@@ -639,7 +641,7 @@ def set_session_active_doc(
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     if session.get("learner_id") != user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
+
     updated = set_active_doc(session_id, payload.doc_id)
     return SessionResponse(**updated)
 
