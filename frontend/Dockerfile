@@ -5,4 +5,5 @@ RUN npm install
 COPY . .
 # Next.js telemetry disable
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME="0.0.0.0"
 CMD ["npm", "run", "dev"]
