@@ -6,10 +6,10 @@ import logging
 import os
 from functools import lru_cache
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-# Load .env file when config is imported
-load_dotenv()
+# Load .env file when config is imported (searches parent directories too)
+load_dotenv(find_dotenv())
 
 logger = logging.getLogger("tablo.config")
 
