@@ -1,5 +1,12 @@
 # Local Env Files
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Backend env files
+backend/.env
 
 # LiveKit self-hosted config (contains credentials)
 livekit.yaml
@@ -9,15 +16,20 @@ secrets/
 # But keep README tracked
 !secrets/README.md
 
-# Backend runtime data (uploads, vector store, knowledge graph)
+# Backend runtime data (uploads, vector store, knowledge graph, sessions)
 backend/data/uploads/
 backend/data/chromadb/
 backend/data/knowledge_graph.json
 backend/data/learner_profiles/
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+backend/data/sessions/
+backend/data/learner_sessions/
+
+# Qdrant vector store data
+qdrant_storage/
+qdrant_data/
+
+# Test reports
+backend/tests/report.json
 
 # Dependencies
 node_modules/

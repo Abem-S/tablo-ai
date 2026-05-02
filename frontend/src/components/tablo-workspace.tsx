@@ -2,7 +2,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Tldraw, type Editor, type TLShapeId, b64Vecs, createShapeId } from "tldraw";
+import { Tldraw, type Editor, type TLShapeId, b64Vecs, createShapeId, getSnapshot, loadSnapshot } from "tldraw";
 import { svgShapeUtils } from "./SvgShape";
 import { toRichText } from "@tldraw/tlschema";
 import { LiveKitRoom, RoomAudioRenderer, VoiceAssistantControlBar, useRoomContext } from "@livekit/components-react";
@@ -4958,6 +4958,7 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
   const [ragSources, setRagSources] = useState<SourceAttribution[]>([]);
   const [ragIsGeneralKnowledge, setRagIsGeneralKnowledge] = useState(true);
   const [viewerDocuments, setViewerDocuments] = useState<DocumentMeta[]>([]);
+  const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const [activeNavigation, setActiveNavigation] = useState<NavigationTarget | null>(null);
   const [roomDetails, setRoomDetails] = useState<{
     roomName: string;
@@ -4967,11 +4968,85 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
   } | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
 
-  // Build auth headers from the session token
+  // Session management
+  type SessionInfo = {
+    id: string;
+    name: string;
+    learner_id: string;
+    doc_ids: string[];
+    active_doc_id: string | null;
+    created_at: string;
+    last_accessed: string;
+  };
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+
+  // Build auth headers from the session token (must be before createNewSession)
   const authHeaders = useCallback((): Record<string, string> => {
     const token = authToken ?? sessionStorage.getItem("tablo_token");
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, [authToken]);
+
+  // Create new session
+  const createNewSession = useCallback(async (name?: string) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/sessions`, {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const newSession = await res.json();
+        setSessions(prev => [newSession, ...prev]);
+        setCurrentSessionId(newSession.id);
+        return newSession;
+      }
+    } catch (e) {
+      console.error("Failed to create session:", e);
+    }
+    return null;
+  }, [authHeaders]);
+
+  // Fetch sessions on mount (after authHeaders is defined)
+  useEffect(() => {
+    async function fetchSessions() {
+      try {
+        const res = await fetch(`${API_BASE_URL}/sessions`, {
+          headers: authHeaders(),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setSessions(data);
+          // Set current session to first one or create default
+          if (data.length > 0) {
+            setCurrentSessionId(data[0].id);
+            // Note: documents and board will be loaded by the useEffect when currentSessionId changes
+          }
+        }
+      } catch (e) {
+        console.error("Failed to fetch sessions:", e);
+      }
+    }
+    fetchSessions();
+  }, [authHeaders]);
+
+  // Load board state and documents when currentSessionId is set or changes
+  // This runs when currentSessionId changes, including on initial load
+  useEffect(() => {
+    if (!currentSessionId) return;
+    
+    console.log("[Session] Loading data for session:", currentSessionId);
+    
+    // Load documents and board - use timeout to ensure callbacks are defined and editor is ready
+    const timer = setTimeout(() => {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadSessionDocuments(currentSessionId);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadBoardState(currentSessionId);
+    }, 500);
+    
+    return () => clearTimeout(timer);
+  }, [currentSessionId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5108,7 +5183,91 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
     };
   }, [editor]);
 
+  // Helper: save current board state to localStorage
+  const saveBoardState = useCallback((sessionId: string) => {
+    if (!editor) return;
+    try {
+      // Get the editor's store snapshot for persistence
+      const storeSnapshot = getSnapshot(editor.store);
+      const key = `tablo_board_${sessionId}`;
+      console.log("[Board] Saving board to:", key);
+      localStorage.setItem(key, JSON.stringify(storeSnapshot));
+    } catch (e) {
+      console.error("Failed to save board state:", e);
+    }
+  }, [editor]);
+
+  // Auto-save board state periodically and on editor changes
+  useEffect(() => {
+    if (!editor || !currentSessionId) return;
+    
+    // Save immediately when editor content changes
+    const cleanup = editor.store.listen(
+      () => {
+        console.log("[Board] Editor changed, auto-saving...");
+        saveBoardState(currentSessionId);
+      },
+      { scope: "document", source: "user" }
+    );
+    
+    // Also save periodically every 5 seconds while editing
+    const intervalId = setInterval(() => {
+      saveBoardState(currentSessionId);
+    }, 5000);
+    
+    return () => {
+      cleanup();
+      clearInterval(intervalId);
+    };
+  }, [editor, currentSessionId, saveBoardState]);
+
+  // Helper: load board state from localStorage
+  const loadBoardState = useCallback((sessionId: string) => {
+    if (!editor) return;
+    try {
+      const key = `tablo_board_${sessionId}`;
+      const saved = localStorage.getItem(key);
+      if (saved) {
+        console.log("[Board] Found board data for:", key);
+        const storeSnapshot = JSON.parse(saved);
+        loadSnapshot(editor.store, storeSnapshot);
+      } else {
+        console.log("[Board] No board data found for:", key);
+      }
+    } catch (e) {
+      console.error("Failed to load board state:", e);
+    }
+  }, [editor]);
+
+  // Helper: clear the board (for new sessions)
+  const clearBoard = useCallback(() => {
+    if (!editor) return;
+    try {
+      // Get all shapes on the current page and delete them
+      const shapeIds = Array.from(editor.getCurrentPageShapeIds());
+      
+      // Delete all shapes at once (safer than store.clear())
+      if (shapeIds.length > 0) {
+        editor.store.remove(shapeIds);
+      }
+    } catch (e) {
+      console.error("Failed to clear board:", e);
+    }
+  }, [editor]);
+
   async function connectLiveKit() {
+    if (!session || !realtimeConfig?.configured) {
+      setErrorMessage(
+        "LiveKit is not configured yet. Add LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET to the backend."
+      );
+      return;
+    }
+
+    // Use current session ID or default to session.session_id
+    await connectLiveKitWithSession(currentSessionId || session.session_id);
+  }
+
+  async function connectLiveKitWithSession(sessionId: string) {
     if (!session || !realtimeConfig?.configured) {
       setErrorMessage(
         "LiveKit is not configured yet. Add LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET to the backend."
@@ -5120,6 +5279,11 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
     setErrorMessage("");
 
     try {
+      // Save current session's board before switching
+      if (currentSessionId && editor) {
+        saveBoardState(currentSessionId);
+      }
+
       const tokenRes = await fetch(`${API_BASE_URL}/livekit/token`, {
         method: "POST",
         headers: {
@@ -5127,7 +5291,7 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
           ...authHeaders(),
         },
         body: JSON.stringify({
-          session_id: session.session_id,
+          session_id: sessionId,
         }),
       });
 
@@ -5146,6 +5310,11 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
         serverUrl: tokenData.server_url,
         token: tokenData.token,
       });
+
+      // Load the new session's board state after connecting
+      setTimeout(() => {
+        loadBoardState(sessionId);
+      }, 1000);
     } catch (error) {
       setRoomState("error");
       setErrorMessage(
@@ -5155,6 +5324,116 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
       );
     }
   }
+
+  // Helper: load session-specific documents
+  const loadSessionDocuments = useCallback(async (sessionId: string) => {
+    console.log("[Docs] Loading documents for session:", sessionId);
+    try {
+      // Get session to find its document IDs
+      const sessionRes = await fetch(`${API_BASE_URL}/sessions/${sessionId}`, {
+        headers: authHeaders(),
+      });
+      if (!sessionRes.ok) {
+        console.log("[Docs] Session fetch failed:", sessionRes.status);
+        return;
+      }
+      
+      const sessionData = await sessionRes.json();
+      const sessionDocIds = sessionData.doc_ids || [];
+      const activeDocId = sessionData.active_doc_id;
+      console.log("[Docs] Session has doc_ids:", sessionDocIds, "active:", activeDocId);
+      
+      if (sessionDocIds.length === 0) {
+        // No documents in this session yet
+        console.log("[Docs] No documents in this session, clearing viewer");
+        setViewerDocuments([]);
+        setActiveDocId(null);
+        return;
+      }
+      
+      // Fetch all documents and filter by session's doc_ids
+      const allDocsRes = await fetch(`${API_BASE_URL}/documents`, {
+        headers: authHeaders(),
+      });
+      if (!allDocsRes.ok) {
+        console.log("[Docs] All docs fetch failed:", allDocsRes.status);
+        return;
+      }
+      
+      const allDocs = await allDocsRes.json();
+      const sessionDocs = allDocs.filter((doc: DocumentMeta) => sessionDocIds.includes(doc.doc_id));
+      console.log("[Docs] Found session docs:", sessionDocs.map((d: DocumentMeta) => d.name));
+      
+      setViewerDocuments(sessionDocs);
+      setActiveDocId(activeDocId);
+    } catch (e) {
+      console.error("Failed to load session documents:", e);
+    }
+  }, [authHeaders]);
+
+  // Handle session change - save board, disconnect, switch session, load session data, reconnect
+  const handleSessionChange = useCallback(async (newSessionId: string) => {
+    // Don't do anything if same session
+    if (newSessionId === currentSessionId) return;
+
+    // Save current board state
+    if (currentSessionId && editor) {
+      saveBoardState(currentSessionId);
+    }
+
+    // Disconnect from current LiveKit room
+    disconnectLiveKit();
+
+    // Update session ID - this triggers the useEffect to load the new session's board
+    setCurrentSessionId(newSessionId);
+
+    // Note: Board and documents for new session are loaded automatically by useEffect
+    
+    // Connect to new session after a short delay
+    setTimeout(() => {
+      connectLiveKitWithSession(newSessionId);
+    }, 500);
+  }, [currentSessionId, editor, saveBoardState, loadSessionDocuments]);
+
+  // Handle new session creation - create new session and clear board
+  const handleCreateNewSession = useCallback(async () => {
+    // Save current board before creating new session
+    if (currentSessionId && editor) {
+      saveBoardState(currentSessionId);
+    }
+
+    // Create new session via API
+    const newSession = await createNewSession();
+    if (newSession) {
+      // Disconnect from current session
+      disconnectLiveKit();
+
+      // Update session ID (createNewSession already sets it)
+      // Don't manually set it here to avoid race conditions
+
+      // Clear board after a delay for the new session
+      setTimeout(() => {
+        if (editor) {
+          try {
+            const shapeIds = Array.from(editor.getCurrentPageShapeIds());
+            if (shapeIds.length > 0) {
+              editor.store.remove(shapeIds);
+            }
+          } catch (e) {
+            console.error("Failed to clear board:", e);
+          }
+        }
+      }, 300);
+
+      // Load documents for new session (will be empty for new session)
+      loadSessionDocuments(newSession.id);
+
+      // Connect to the new session
+      setTimeout(() => {
+        connectLiveKitWithSession(newSession.id);
+      }, 800);
+    }
+  }, [currentSessionId, editor, saveBoardState, createNewSession, loadSessionDocuments]);
 
   function disconnectLiveKit() {
     setRoomDetails(null);
@@ -5195,7 +5474,7 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
           }
         }}
       />
-      <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50">
+      <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.2),_transparent_30%),linear-gradient(180deg,_#113c66_0%,_#0a1d2f_50%,_#07111a_100%)] text-slate-50 flex flex-col">
         <div className="relative flex min-h-screen flex-col">
 
         <section className="flex min-h-screen flex-1">
@@ -5207,16 +5486,28 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
             <DocumentViewerPanel
               documents={viewerDocuments}
               activeNavigation={activeNavigation}
+              activeDocId={activeDocId}
               isConnected={roomState === "connected"}
               onLearnerSelection={(selection) => {
                 if (roomState !== "connected") return;
                 pendingLearnerContextRef.current = selection;
               }}
               onRefreshDocuments={() => {
-                fetch(`${API_BASE_URL}/documents`, { headers: authHeaders() })
-                  .then((r) => r.json())
-                  .then(setViewerDocuments)
-                  .catch(() => {});
+                // Refresh session-specific documents after upload
+                if (currentSessionId) {
+                  loadSessionDocuments(currentSessionId);
+                }
+              }}
+              onSelectDocument={(docId) => {
+                setActiveDocId(docId);
+                // Update session's active doc
+                if (currentSessionId) {
+                  fetch(`${API_BASE_URL}/sessions/${currentSessionId}/active-doc`, {
+                    method: "PATCH",
+                    headers: { ...authHeaders(), "Content-Type": "application/json" },
+                    body: JSON.stringify({ doc_id: docId }),
+                  }).catch(() => {});
+                }
               }}
             />
           </div>
@@ -5238,30 +5529,82 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
               </div>
               {roomState === "connected" ? (
                 <div className="flex items-center gap-3" data-lk-theme="default">
-                  <DocumentUploadButton authHeaders={authHeaders()} />
+                  {/* Session Selector */}
+                  <select
+                    className="rounded-lg border border-[#1A2F4B]/30 bg-[#FCF8F3] px-3 py-1.5 text-xs text-[#0F172A] font-medium"
+                    value={currentSessionId || ""}
+                    onChange={(e) => handleSessionChange(e.target.value)}
+                    style={{ backgroundColor: '#FCF8F3', color: '#0F172A' }}
+                  >
+                    {sessions.map((s) => (
+                      <option key={s.id} value={s.id} style={{ backgroundColor: '#FCF8F3', color: '#0F172A' }}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="rounded-full border border-[#EF7060]/30 bg-[#EF7060]/10 px-3 py-1.5 text-xs font-semibold text-[#EF7060]"
+                    onClick={handleCreateNewSession}
+                    type="button"
+                    title="Create new session"
+                  >
+                    + New Topic
+                  </button>
+                  <DocumentUploadButton authHeaders={authHeaders()} sessionId={currentSessionId} />
                   <VoiceAssistantControlBar />
                   <button
-                    className="rounded-full border border-rose-300/30 bg-rose-400/10 px-4 py-2 text-sm font-semibold text-rose-100"
+                    className="rounded-full border border-[#1A2F4B]/30 bg-[#1A2F4B] px-4 py-2 text-sm font-semibold text-white"
                     onClick={disconnectLiveKit}
                     type="button"
+                    style={{ backgroundColor: '#1A2F4B' }}
                   >
-                    Disconnect
+                    End Chat
                   </button>
                 </div>
               ) : (
-                <button
-                  className="rounded-full border border-cyan-300/30 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={roomState === "connecting"}
-                  onClick={connectLiveKit}
-                  type="button"
-                >
-                  {roomState === "connecting" ? "Connecting..." : "Connect LiveKit"}
-                </button>
+                <div className="flex items-center gap-4">
+                  {/* Tablo Logo */}
+                  <img 
+                    src="/tablo.webp" 
+                    alt="Tablo" 
+                    style={{ height: '32px', width: 'auto', objectFit: 'contain' }}
+                  />
+                  <button
+                    className="rounded-full border border-[#EF7060] bg-[#EF7060] px-6 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 shadow-lg"
+                    disabled={roomState === "connecting"}
+                    onClick={connectLiveKit}
+                    type="button"
+                    style={{ backgroundColor: '#EF7060', borderColor: '#EF7060' }}
+                  >
+                    {roomState === "connecting" ? "Connecting..." : "🎙️ Talk to Tablo"}
+                  </button>
+                </div>
               )}
             </div>
           </div>
         </div>
       </div>
+    {/* Footer with branding */}
+      <footer 
+        className="flex items-center justify-between px-6 py-3 text-xs"
+        style={{ 
+          backgroundColor: '#1A2F4B', 
+          color: '#FCF8F3',
+          borderTop: '1px solid rgba(255,255,255,0.1)'
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <img 
+            src="/tablo.webp" 
+            alt="Tablo" 
+            style={{ height: '20px', width: 'auto', objectFit: 'contain' }}
+          />
+          <span style={{ color: '#F2E8DF' }}>© 2026 Tablo</span>
+        </div>
+        <div style={{ color: '#F2E8DF', opacity: 0.7 }}>
+          Voice-First AI Learning Assistant
+        </div>
+      </footer>
     </main>
     </LiveKitRoom>
   );

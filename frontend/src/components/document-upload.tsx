@@ -12,7 +12,13 @@ interface UploadedDoc {
   status: string;
 }
 
-export function DocumentUploadButton({ authHeaders = {} }: { authHeaders?: Record<string, string> }) {
+export function DocumentUploadButton({ 
+  authHeaders = {}, 
+  sessionId 
+}: { 
+  authHeaders?: Record<string, string>;
+  sessionId?: string | null;
+}) {
   const [open, setOpen] = useState(false);
   const [docs, setDocs] = useState<UploadedDoc[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -41,7 +47,11 @@ export function DocumentUploadButton({ authHeaders = {} }: { authHeaders?: Recor
     const form = new FormData();
     form.append("file", file);
     try {
-      const res = await fetch(`${API_BASE_URL}/documents/upload`, {
+      // Add session_id to form if provided
+      if (sessionId) {
+        form.append("session_id", sessionId);
+      }
+      const res = await fetch(`${API_BASE_URL}/documents/upload?session_id=${encodeURIComponent(sessionId || "")}`, {
         method: "POST",
         headers: authHeaders,
         body: form,
@@ -106,7 +116,7 @@ export function DocumentUploadButton({ authHeaders = {} }: { authHeaders?: Recor
         onClick={handleOpen}
         title="Upload source documents"
         style={{
-          background: open ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)",
+          background: open ? "rgba(239, 112, 96, 0.2)" : "rgba(239, 112, 96, 0.1)",
           border: "1px solid rgba(255,255,255,0.12)",
           borderRadius: "50%",
           width: "36px",

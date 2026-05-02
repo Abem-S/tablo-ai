@@ -124,9 +124,30 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 - Command validation layer rejects malformed commands with typed error codes
 - All commands logged with success/failure status
 
+#### Session Management
+
+- **`backend/sessions.py`** — session management API with CRUD operations
+- Sessions stored in `backend/data/sessions/` as JSON files
+- Each session tracks: `doc_ids` (list of document IDs), `active_doc_id`, `created_at`, `last_accessed`
+- Per-session learner sessions list in `backend/data/learner_sessions/`
+- API endpoints:
+  - `GET /sessions` — list all sessions for user
+  - `POST /sessions` — create new session
+  - `GET /sessions/{id}` — get session details
+  - `DELETE /sessions/{id}` — delete session
+  - `PATCH /sessions/{id}/active-doc` — set active document for session
+
+#### Board State Per Session
+
+- Board state saved to browser localStorage as `tablo_board_{session_id}`
+- Auto-save triggers: on every editor change (via store listener) and every 5 seconds
+- Board loads automatically when switching sessions or on page refresh
+- Each session has independent board state
+
 #### RAG System
 
 - **Vector store:** Qdrant (self-hosted Docker or Qdrant Cloud). `tablo_shared` collection for single-user/open-source mode. Per-user collections (`tablo_{user_id}`) when auth is added.
+- Documents are associated with sessions — when uploading, `session_id` is passed to link the doc to that session.
 - **`backend/rag/vector_store.py`** — thin Qdrant wrapper (upsert, search, delete, scroll, payload update)
 - **`backend/rag/ingestion.py`** — two-phase ingestion: fast text chunking + background diagram extraction. Diagram page images embedded directly via `gemini-embedding-2` multimodal alongside text chunks.
 - **`backend/rag/retrieval.py`** — hybrid vector + knowledge graph search with RRF reranking. Threshold 0.1 (Qdrant cosine scores differ from ChromaDB distances).
@@ -145,11 +166,12 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 #### Document Viewer Panel
 
 - Collapsible panel (📚 tab) overlaid on the right of the canvas
-- `react-pdf` renders actual PDF pages at full panel width with prev/next navigation
+- `react-pdf` renders actual PDF pages at full panel width with prev/next navigation with ResizeObserver for proper sizing
 - AI auto-opens panel, jumps to correct page, highlights referenced excerpt in PDF text layer
 - Select text → "Ask AI about this" floating tooltip → sends via `learner.context` LiveKit topic → agent prepends to next `search_documents` query
 - Text/image/HTML viewers for non-PDF formats
 - `learner.context` is consumed once per `search_documents` call, then cleared
+- **Session-specific documents** — only shows documents uploaded to the current session
 
 #### LiveKit — Cloud and Self-Hosted
 
@@ -171,6 +193,10 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 - The sidebar with "Realtime status", "Session readiness", "LiveKit setup" descriptions has been removed — do not re-add it.
 - If status surfaces exist, they should reflect real system state.
 - Do NOT restore `CanvasVideoPublisher` or `video_input=True` — use `BoardSnapshotPublisher`.
+- **Session selector** — session dropdown in control bar for switching between sessions
+- **Board auto-save** — saves to localStorage on every change + every 5 seconds
+- **Session-specific documents** — document viewer shows only documents uploaded to the current session
+- **Brand colors** — UI uses brand palette: Deep Navy (#1A2F4B), Soft Coral (#EF7060), Cream (#FCF8F3)
 
 ## Backend Implementation Guardrails
 

@@ -34,9 +34,11 @@ export interface LearnerSelection {
 interface DocumentViewerPanelProps {
   documents: DocumentMeta[];
   activeNavigation: NavigationTarget | null;
+  activeDocId: string | null;
   isConnected: boolean;
   onLearnerSelection: (selection: LearnerSelection) => void;
   onRefreshDocuments: () => void;
+  onSelectDocument: (docId: string) => void;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -167,16 +169,28 @@ function PdfViewer({ fileUrl, targetPage, highlight, onSelection }: PdfViewerPro
   const [containerWidth, setContainerWidth] = useState<number>(356);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Update container width on resize
+  // Update container width when container resizes (including panel expand/collapse)
   useEffect(() => {
+    if (!containerRef.current) return;
+    
     const updateWidth = () => {
       if (containerRef.current) {
         setContainerWidth(containerRef.current.clientWidth || 356);
       }
     };
+    
+    // Use ResizeObserver to detect container size changes
+    const resizeObserver = new ResizeObserver(() => {
+      updateWidth();
+    });
+    resizeObserver.observe(containerRef.current);
+    
+    // Initial measurement
     updateWidth();
-    window.addEventListener("resize", updateWidth);
-    return () => window.removeEventListener("resize", updateWidth);
+    
+    return () => {
+      resizeObserver.disconnect();
+    };
   }, []);
 
   // Jump to page when AI navigates - use functional update to avoid direct setState in effect
@@ -368,9 +382,11 @@ function TextViewer({ docId, highlight, onSelection }: TextViewerProps) {
 export function DocumentViewerPanel({
   documents,
   activeNavigation,
+  activeDocId,
   isConnected,
   onLearnerSelection,
   onRefreshDocuments,
+  onSelectDocument,
 }: DocumentViewerPanelProps) {
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [selectedDoc, setSelectedDoc] = useState<DocumentMeta | null>(null);
@@ -462,7 +478,7 @@ export function DocumentViewerPanel({
             flex: 1,
             display: "flex",
             flexDirection: "column",
-            background: "rgba(10,20,35,0.97)",
+            background: "rgba(26, 47, 75, 0.97)",
             borderLeft: "1px solid rgba(255,255,255,0.1)",
             overflow: "hidden",
           }}
@@ -481,6 +497,39 @@ export function DocumentViewerPanel({
               flexShrink: 0,
             }}
           >
+            {/* Document selector dropdown */}
+            {documents.length > 1 && (
+              <div style={{ padding: "8px 12px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+                <select
+                  value={selectedDoc?.doc_id || activeDocId || ""}
+                  onChange={(e) => {
+                    const docId = e.target.value;
+                    const doc = documents.find(d => d.doc_id === docId);
+                    if (doc) {
+                      setSelectedDoc(doc);
+                      onSelectDocument(docId);
+                    }
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: "6px 8px",
+                    borderRadius: "6px",
+                    background: "rgba(255,255,255,0.08)",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    color: "#e2e8f0",
+                    fontSize: "12px",
+                    cursor: "pointer",
+                  }}
+                >
+                  <option value="" disabled>Select document</option>
+                  {documents.map((doc) => (
+                    <option key={doc.doc_id} value={doc.doc_id}>
+                      {displayName(doc.name)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             {documents.map((doc) => (
               <div
                 key={doc.doc_id}

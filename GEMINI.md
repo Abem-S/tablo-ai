@@ -75,9 +75,11 @@ NEVER skip Step 1.
 
 - Collapsible panel (📚 tab) overlaid on the right of the canvas
 - `react-pdf` renders actual PDF pages at full panel width with prev/next navigation
+- Uses `ResizeObserver` for proper PDF sizing when panel expands
 - AI auto-opens panel, jumps to correct page, highlights referenced excerpt in PDF text layer
 - Select text → "Ask AI about this" floating tooltip → sends via `learner.context` LiveKit topic → agent prepends to next `search_documents` query
 - Text/image/HTML viewers for non-PDF formats (DOCX/PPTX show extracted text)
+- **Session-specific documents** — only shows documents uploaded to the current session
 
 ### AI Drawing
 

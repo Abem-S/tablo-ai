@@ -12,6 +12,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
     Depends,
+    Query,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,14 @@ from auth import (
     get_current_user,
     is_auth_enabled,
     LOCAL_ADMIN_USER_ID,
+)
+from sessions import (
+    create_session,
+    get_session,
+    list_sessions,
+    delete_session,
+    set_active_doc,
+    add_doc_to_session,
 )
 
 load_dotenv()
@@ -365,6 +374,7 @@ class IngestionResponse(BaseModel):
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    session_id: str | None = Query(default=None, description="Optional session ID to add doc to"),
     user_id: str = Depends(get_current_user),
 ) -> IngestionResponse:
     """Upload a document and trigger the ingestion pipeline.
@@ -372,6 +382,8 @@ async def upload_document(
     Returns immediately with status='processing'. Ingestion (parse → chunk → embed)
     runs in the background so the student can start talking right away.
     The document becomes searchable once ingestion completes (~5-30s depending on size).
+    
+    Optionally specify session_id to auto-add document to that session.
     """
     filename = file.filename or "document"
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
@@ -407,6 +419,9 @@ async def upload_document(
                 await ingestion.extract_and_attach_diagrams(
                     file_path=save_path, doc_id=result.doc_id
                 )
+            # Associate with session if provided
+            if session_id and result.status == "complete":
+                add_doc_to_session(session_id, result.doc_id)
             # Update ingestion status cache
             _ingestion_status[doc_id] = {
                 "doc_id": doc_id,
@@ -537,6 +552,96 @@ async def extract_diagrams(
         ingestion.extract_and_attach_diagrams, file_path=file_path, doc_id=doc_id
     )
     return {"status": "extraction_started", "doc_id": doc_id, "file": matching[0]}
+
+
+# ---------------------------------------------------------------------------
+# Session management endpoints
+# ---------------------------------------------------------------------------
+
+
+class SessionCreateRequest(BaseModel):
+    name: str | None = None
+
+
+class SessionResponse(BaseModel):
+    id: str
+    name: str
+    learner_id: str
+    doc_ids: list
+    active_doc_id: str | None
+    created_at: str
+    last_accessed: str
+
+
+class SetActiveDocRequest(BaseModel):
+    doc_id: str | None = None
+
+
+@app.get("/sessions", response_model=list[SessionResponse])
+def get_sessions(user_id: str = Depends(get_current_user)) -> list[SessionResponse]:
+    """List all sessions for the current user."""
+    sessions = list_sessions(user_id)
+    return [SessionResponse(**s) for s in sessions]
+
+
+@app.post("/sessions", response_model=SessionResponse)
+def create_new_session(
+    payload: SessionCreateRequest,
+    user_id: str = Depends(get_current_user),
+) -> SessionResponse:
+    """Create a new session."""
+    session = create_session(user_id, payload.name)
+    return SessionResponse(**session)
+
+
+@app.get("/sessions/{session_id}", response_model=SessionResponse)
+def get_session_details(
+    session_id: str,
+    user_id: str = Depends(get_current_user),
+) -> SessionResponse:
+    """Get a specific session."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    # Security: ensure session belongs to user
+    if session.get("learner_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return SessionResponse(**session)
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session_endpoint(
+    session_id: str,
+    user_id: str = Depends(get_current_user),
+) -> dict[str, str]:
+    """Delete a session."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    if session.get("learner_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    deleted = delete_session(session_id, user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    return {"status": "deleted", "session_id": session_id}
+
+
+@app.patch("/sessions/{session_id}/active-doc", response_model=SessionResponse)
+def set_session_active_doc(
+    session_id: str,
+    payload: SetActiveDocRequest,
+    user_id: str = Depends(get_current_user),
+) -> SessionResponse:
+    """Set the active document for a session."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    if session.get("learner_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    updated = set_active_doc(session_id, payload.doc_id)
+    return SessionResponse(**updated)
 
 
 # Content-Type mapping for file serving
