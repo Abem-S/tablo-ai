@@ -274,8 +274,10 @@ def realtime_config() -> RealtimeConfigResponse:
 
 @app.post("/livekit/token", response_model=LiveKitTokenResponse)
 async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
-    livekit_url = get_env("LIVEKIT_URL")       # internal: used for dispatch API calls
-    livekit_public_url = get_env("LIVEKIT_PUBLIC_URL") or livekit_url  # browser-facing URL
+    livekit_url = get_env("LIVEKIT_URL")  # internal: used for dispatch API calls
+    livekit_public_url = (
+        get_env("LIVEKIT_PUBLIC_URL") or livekit_url
+    )  # browser-facing URL
     api_key = get_env("LIVEKIT_API_KEY")
     api_secret = get_env("LIVEKIT_API_SECRET")
 
