@@ -159,8 +159,19 @@ def start_metrics_server(
         def log_message(self, format, *args):
             return
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    except OSError:
+        # Port already bound by a previous job process — metrics are best-effort.
+        # Never crash the agent session over this.
+        logger.info(
+            "Metrics server port %d already in use — skipping (another job has it)", port
+        )
+        _METRICS_SERVER_STARTED = True
+        return
+
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     _METRICS_SERVER_STARTED = True
     logger.info("Metrics server listening on :%d", port)
+
