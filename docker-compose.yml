@@ -61,6 +61,7 @@ services:
     environment:
       - QDRANT_URL=http://qdrant:6333
       - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_PUBLIC_URL=ws://localhost:7880
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles

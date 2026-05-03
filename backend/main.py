@@ -274,7 +274,8 @@ def realtime_config() -> RealtimeConfigResponse:
 
 @app.post("/livekit/token", response_model=LiveKitTokenResponse)
 async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
-    livekit_url = get_env("LIVEKIT_URL")
+    livekit_url = get_env("LIVEKIT_URL")       # internal: used for dispatch API calls
+    livekit_public_url = get_env("LIVEKIT_PUBLIC_URL") or livekit_url  # browser-facing URL
     api_key = get_env("LIVEKIT_API_KEY")
     api_secret = get_env("LIVEKIT_API_SECRET")
 
@@ -345,7 +346,7 @@ async def livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
         print(f"Warning: Failed to initialize LiveKit API for dispatch: {e}")
 
     return LiveKitTokenResponse(
-        server_url=livekit_url,
+        server_url=livekit_public_url,
         room_name=room_name,
         participant_identity=participant_identity,
         token=token,
