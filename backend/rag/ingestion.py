@@ -31,10 +31,10 @@ logger = logging.getLogger("tablo-rag.ingestion")
 _HIGH_RELEVANCE_THRESHOLD = 0.7
 _MAX_CHUNK_CHARS = 1200
 _MIN_CHUNK_CHARS = 100
-_PARSE_TIMEOUT_S = float(os.getenv("RAG_PARSE_TIMEOUT_S", "20"))
+_PARSE_TIMEOUT_S = float(os.getenv("RAG_PARSE_TIMEOUT_S", "300"))
 _EMBED_TIMEOUT_S = float(os.getenv("RAG_EMBED_TIMEOUT_S", "10"))
 _EMBED_RETRIES = int(os.getenv("RAG_EMBED_RETRIES", "2"))
-_CONCEPT_TIMEOUT_S = float(os.getenv("RAG_CONCEPT_TIMEOUT_S", "8"))
+_CONCEPT_TIMEOUT_S = float(os.getenv("RAG_CONCEPT_TIMEOUT_S", "60"))
 _CONCEPT_RETRIES = int(os.getenv("RAG_CONCEPT_RETRIES", "1"))
 
 
