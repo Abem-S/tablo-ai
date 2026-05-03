@@ -43,7 +43,7 @@ from learner_memory import (
     apply_update,
     format_profile_for_prompt,
 )
-from sessions import add_session_note
+from sessions import add_session_note, get_session
 from skills_loader import build_system_prompt
 from config import get_env
 from math_eval import evaluate_expression, MathEvaluationError
@@ -143,6 +143,7 @@ class TabloAgent(Agent):
         self._room = room
         self._learner_id = learner_id
         self._session_id = session_id
+        self._session_doc_ids: list[str] = []  # scopes RAG to session documents
         self._learner_profile = learner_profile
         self._retrieval = retrieval
         self._rag_orchestrator = rag_orchestrator
@@ -507,7 +508,8 @@ class TabloAgent(Agent):
                     query=query,
                     turn_id=str(uuid4()),
                     top_k=4,
-                    threshold=0.1,  # low threshold — Qdrant cosine scores differ from ChromaDB
+                    threshold=0.1,
+                    allowed_doc_ids=self._session_doc_ids or None,
                 )
 
                 logger.info(
@@ -807,6 +809,18 @@ async def entrypoint(ctx: JobContext):
         rag_orchestrator=None,
         collection_name=ingestion._collection,
     )
+
+    # Scope RAG to this session's documents
+    session_data = get_session(session_id)
+    if session_data:
+        tablo_agent._session_doc_ids = session_data.get("doc_ids", [])
+        logger.info(
+            "Session %s has %d documents for RAG scoping",
+            session_id,
+            len(tablo_agent._session_doc_ids),
+        )
+    else:
+        logger.warning("Could not load session %s for doc scoping", session_id)
 
     # Bind the agent's tools to the MCP registry so external MCP clients
     # and LangGraph sub-agents can call them without importing TabloAgent.

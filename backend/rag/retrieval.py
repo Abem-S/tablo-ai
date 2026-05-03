@@ -150,27 +150,42 @@ class RetrievalPipeline:
     # Vector search
     # ------------------------------------------------------------------
 
-    async def vector_search(self, query: str, top_k: int = 10) -> list[ScoredChunk]:
+    async def vector_search(
+        self,
+        query: str,
+        top_k: int = 10,
+        allowed_doc_ids: list[str] | None = None,
+    ) -> list[ScoredChunk]:
         """Embed query and search Qdrant. Returns scored chunks."""
         try:
             embedding = await asyncio.wait_for(
                 self._embed_query(query),
                 timeout=_RETRIEVAL_TIMEOUT_S,
             )
+            # Build a simple filter for single-doc sessions
+            filter_: dict | None = None
+            if allowed_doc_ids and len(allowed_doc_ids) == 1:
+                filter_ = {"doc_id": allowed_doc_ids[0]}
+            # Over-fetch when filtering so we still get top_k after post-filter
+            fetch_k = top_k if not allowed_doc_ids else top_k * 3
             results = vs.search_vectors(
                 self._client,
                 self._collection,
                 query_vector=embedding,
-                top_k=top_k,
+                top_k=fetch_k,
+                filter_=filter_,
             )
+            allowed_set = set(allowed_doc_ids) if allowed_doc_ids else None
             scored: list[ScoredChunk] = []
             for r in results:
                 p = r["payload"]
+                if allowed_set and p.get("doc_id") not in allowed_set:
+                    continue
                 chunk = self._payload_to_chunk(p)
                 scored.append(
                     ScoredChunk(chunk=chunk, score=r["score"], source="vector")
                 )
-            return scored
+            return scored[:top_k]
         except asyncio.TimeoutError:
             logger.warning("Vector search timed out")
             return []
@@ -404,13 +419,21 @@ class RetrievalPipeline:
         turn_id: str,
         top_k: int = 5,
         threshold: float = _DEFAULT_THRESHOLD,
+        allowed_doc_ids: list[str] | None = None,
     ) -> RetrievalResult:
         start = time.monotonic()
         try:
             vector_results, graph_results = await asyncio.gather(
-                self.vector_search(query, top_k=top_k * 2),
+                self.vector_search(query, top_k=top_k * 2, allowed_doc_ids=allowed_doc_ids),
                 asyncio.to_thread(self.graph_search, query, top_k=top_k),
             )
+
+            # Post-filter graph results to session documents
+            if allowed_doc_ids:
+                allowed_set = set(allowed_doc_ids)
+                graph_results = [
+                    sc for sc in graph_results if sc.chunk.doc_id in allowed_set
+                ]
 
             vector_filtered = [sc for sc in vector_results if sc.score >= threshold]
             graph_filtered = [sc for sc in graph_results if sc.score >= threshold]
@@ -422,10 +445,11 @@ class RetrievalPipeline:
             elapsed_ms = (time.monotonic() - start) * 1000
 
             logger.info(
-                "Retrieval: %d chunks (threshold=%.2f, %.0fms)",
+                "Retrieval: %d chunks (threshold=%.2f, %.0fms, doc_filter=%s)",
                 len(top),
                 threshold,
                 elapsed_ms,
+                f"{len(allowed_doc_ids)} docs" if allowed_doc_ids else "all",
             )
             RAG_RETRIEVAL_LATENCY_SECONDS.observe(elapsed_ms / 1000)
             return RetrievalResult(context=context, elapsed_ms=elapsed_ms)
@@ -437,3 +461,4 @@ class RetrievalPipeline:
                 turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True
             )
             return RetrievalResult(context=context, elapsed_ms=elapsed_ms)
+

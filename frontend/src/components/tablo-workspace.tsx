@@ -5428,9 +5428,10 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
     // Don't do anything if same session
     if (newSessionId === currentSessionId) return;
 
-    // Save current board state
+    // Save current board state to backend before switching
     if (currentSessionId && editor) {
       saveBoardState(currentSessionId);
+      await syncBoardToBackend(currentSessionId);
     }
 
     // Disconnect from current LiveKit room
@@ -5440,12 +5441,12 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
     setCurrentSessionId(newSessionId);
 
     // Note: Board and documents for new session are loaded automatically by useEffect
-    
-    // Connect to new session after a short delay
+    // Give the LiveKit room time to fully disconnect before reconnecting
     setTimeout(() => {
       connectLiveKitWithSession(newSessionId);
-    }, 500);
-  }, [currentSessionId, editor, saveBoardState, loadSessionDocuments]);
+    }, 1200);
+  }, [currentSessionId, editor, saveBoardState, syncBoardToBackend, loadSessionDocuments]);
+
 
   // Handle new session creation - create new session and clear board
   const handleCreateNewSession = useCallback(async () => {
