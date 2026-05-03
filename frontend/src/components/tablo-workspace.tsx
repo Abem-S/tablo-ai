@@ -135,7 +135,22 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
     }
       
     case "create_geo": {
-      if (!(cmd as any).place && (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y))) {
+      // If using place, don't require explicit x/y
+      if (cmd.place) {
+        if (!Number.isFinite(cmd.w) || !Number.isFinite(cmd.h)) {
+          return { 
+            valid: false, 
+            error: { 
+              code: "VALIDATION_FAILED", 
+              message: "Invalid geometry: w and h must be finite numbers",
+              details: { w: cmd.w, h: cmd.h }
+            } 
+          };
+        }
+        return { valid: true };
+      }
+      // Otherwise require explicit coordinates
+      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y)) {
         return { valid: false, error: { code: "VALIDATION_FAILED", message: "Missing placement or x/y coordinates" } };
       }
       if (!Number.isFinite(cmd.w) || !Number.isFinite(cmd.h)) {
@@ -162,6 +177,11 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
     }
       
     case "create_arrow": {
+      // Allow place-based placement (auto or relative)
+      if (cmd.place) {
+        return { valid: true };
+      }
+      // Otherwise require explicit coordinates
       if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y) ||
           !Number.isFinite(cmd.toX) || !Number.isFinite(cmd.toY)) {
         return { 
@@ -246,6 +266,21 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
     }
       
     case "create_svg": {
+      // If using place, don't require explicit x/y
+      if (cmd.place) {
+        if (!cmd.svg || typeof cmd.svg !== "string") {
+          return { 
+            valid: false, 
+            error: { 
+              code: "VALIDATION_FAILED", 
+              message: "SVG content must be a non-empty string",
+              details: { svg: cmd.svg }
+            } 
+          };
+        }
+        return { valid: true };
+      }
+      // Otherwise require explicit coordinates
       if (!cmd.svg || typeof cmd.svg !== "string") {
         return { 
           valid: false, 
@@ -691,10 +726,11 @@ type BoardCommand =
       v: number;
       id: string;
       op: "create_arrow";
-      x: number;
-      y: number;
-      toX: number;
-      toY: number;
+      x?: number;
+      y?: number;
+      toX?: number;
+      toY?: number;
+      place?: PlacementOptions;
     }
   | {
       v: number;
@@ -3309,15 +3345,14 @@ function applyBoardCommand(
         break;
       }
       case "create_geo": {
-        if (
-          !Number.isFinite(command.x) ||
-          !Number.isFinite(command.y) ||
-          !Number.isFinite(command.w) ||
-          !Number.isFinite(command.h)
-        ) {
-          console.warn("Skipping invalid geo command", command);
+        // w and h are required
+        if (!Number.isFinite(command.w) || !Number.isFinite(command.h)) {
+          console.warn("Skipping invalid geo command: missing w/h", command);
           break;
         }
+
+        // Use resolvePlacement for positioning (supports place, auto, or x/y)
+        const { x: geoX, y: geoY } = resolvePlacement(editor, command, command.w, command.h);
 
         // Convert all geo shapes to SVG for consistent rendering
         const geoType = (command.geo || "rectangle").toLowerCase();
@@ -3327,7 +3362,6 @@ function applyBoardCommand(
 
         // Generate SVG content based on geo type
         let geoSvg = "";
-        const stroke = "stroke='black' stroke-width='2' fill='none'";
         switch (geoType) {
           case "rectangle":
           case "box":
@@ -3351,15 +3385,6 @@ function applyBoardCommand(
             break;
         }
 
-        // Place in viewport center
-        const vpGeo = editor.getViewportPageBounds();
-        let geoX = command.x;
-        let geoY = command.y;
-        if (geoX < vpGeo.x || geoX > vpGeo.x + vpGeo.w || geoY < vpGeo.y || geoY > vpGeo.y + vpGeo.h) {
-          geoX = vpGeo.x + vpGeo.w / 2 - gw / 2;
-          geoY = vpGeo.y + vpGeo.h / 2 - gh / 2;
-        }
-
         editor.createShape({
           type: "svg_shape",
           x: geoX,
@@ -3371,12 +3396,12 @@ function applyBoardCommand(
         break;
       }
       case "create_arrow": {
-        // Default to viewport center if coordinates are missing
-        const vpa = editor.getViewportPageBounds();
-        const ax = Number.isFinite(command.x) ? command.x : vpa.x + vpa.w * 0.3;
-        const ay = Number.isFinite(command.y) ? command.y : vpa.y + vpa.h / 2;
-        const atx = Number.isFinite(command.toX) ? command.toX : vpa.x + vpa.w * 0.7;
-        const aty = Number.isFinite(command.toY) ? command.toY : vpa.y + vpa.h / 2;
+        // Use resolvePlacement for start point (supports place, auto, or x/y)
+        const { x: ax, y: ay } = resolvePlacement(editor, command, 100, 0);
+        
+        // For end point, use provided toX/toY or default to a standard arrow length
+        const atx = Number.isFinite(command.toX) ? command.toX! : ax + 100;
+        const aty = Number.isFinite(command.toY) ? command.toY! : ay;
         const dx = atx - ax;
         const dy = aty - ay;
 
@@ -3647,8 +3672,6 @@ function applyBoardCommand(
       // ============================================
       case "create_svg": {
         const { svg, color } = command;
-        let x: number = (command.x as number) ?? 0;
-        let y: number = (command.y as number) ?? 0;
         const w = command.w ?? 200;
         const h = command.h ?? 200;
 
@@ -3662,12 +3685,8 @@ function applyBoardCommand(
         const height = Number.isFinite(h) && h > 0 ? h : 200;
         const strokeColor = color || "#1e293b";
 
-        // Use agent coordinates if valid, otherwise viewport center
-        const vpSvg = editor.getViewportPageBounds();
-        if (!Number.isFinite(x) || !Number.isFinite(y)) {
-          x = vpSvg.x + vpSvg.w / 2 - width / 2;
-          y = vpSvg.y + vpSvg.h / 2 - height / 2;
-        }
+        // Use resolvePlacement for positioning (supports place, auto, or x/y)
+        const { x, y } = resolvePlacement(editor, command, width, height);
 
         const svgShapeId = editor.createShape({
           type: "svg_shape",
