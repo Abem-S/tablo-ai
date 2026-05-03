@@ -16,6 +16,7 @@ LIVEKIT_URL=ws://localhost:7880
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
 QDRANT_URL=http://qdrant:6333
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 EOL
     echo "Created .env file with default local settings."
 else
