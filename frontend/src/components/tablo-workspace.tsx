@@ -4980,6 +4980,8 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
   };
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [sessionNotes, setSessionNotes] = useState<{text: string; timestamp: string}[]>([]);
+  const [showNotes, setShowNotes] = useState(false);
 
   // Build auth headers from the session token (must be before createNewSession)
   const authHeaders = useCallback((): Record<string, string> => {
@@ -5034,19 +5036,38 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
   // This runs when currentSessionId changes, including on initial load
   useEffect(() => {
     if (!currentSessionId) return;
-    
-    console.log("[Session] Loading data for session:", currentSessionId);
-    
-    // Load documents and board - use timeout to ensure callbacks are defined and editor is ready
+
+    // Load documents, board, and notes when session changes
     const timer = setTimeout(() => {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       loadSessionDocuments(currentSessionId);
       // eslint-disable-next-line react-hooks/set-state-in-effect
       loadBoardState(currentSessionId);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      loadSessionNotes(currentSessionId);
     }, 500);
-    
+
     return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionId]);
+
+  // Load session notes from backend
+  const loadSessionNotes = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/sessions/${sessionId}/notes`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSessionNotes(data.notes || []);
+      } else {
+        setSessionNotes([]);
+      }
+    } catch {
+      setSessionNotes([]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -5183,60 +5204,91 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
     };
   }, [editor]);
 
-  // Helper: save current board state to localStorage
+  // Helper: save current board state to localStorage (fast, synchronous)
   const saveBoardState = useCallback((sessionId: string) => {
     if (!editor) return;
     try {
-      // Get the editor's store snapshot for persistence
       const storeSnapshot = getSnapshot(editor.store);
       const key = `tablo_board_${sessionId}`;
-      console.log("[Board] Saving board to:", key);
       localStorage.setItem(key, JSON.stringify(storeSnapshot));
     } catch (e) {
-      console.error("Failed to save board state:", e);
+      console.error("Failed to save board state to localStorage:", e);
     }
   }, [editor]);
 
-  // Auto-save board state periodically and on editor changes
+  // Helper: sync board state to backend (async, called on interval)
+  const syncBoardToBackend = useCallback(async (sessionId: string) => {
+    if (!editor) return;
+    try {
+      const storeSnapshot = getSnapshot(editor.store);
+      await fetch(`${API_BASE_URL}/sessions/${sessionId}/board`, {
+        method: "PUT",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(storeSnapshot),
+      });
+      console.log("[Board] Synced to backend:", sessionId);
+    } catch (e) {
+      console.warn("[Board] Backend sync failed (non-critical):", e);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor]);
+
+  // Auto-save board state: localStorage on every change, backend every 5 seconds
   useEffect(() => {
     if (!editor || !currentSessionId) return;
-    
-    // Save immediately when editor content changes
+
+    // Save to localStorage immediately on every document change
     const cleanup = editor.store.listen(
       () => {
-        console.log("[Board] Editor changed, auto-saving...");
         saveBoardState(currentSessionId);
       },
       { scope: "document", source: "user" }
     );
-    
-    // Also save periodically every 5 seconds while editing
+
+    // Sync to backend every 5 seconds
     const intervalId = setInterval(() => {
       saveBoardState(currentSessionId);
+      syncBoardToBackend(currentSessionId);
     }, 5000);
-    
+
     return () => {
       cleanup();
       clearInterval(intervalId);
     };
-  }, [editor, currentSessionId, saveBoardState]);
+  }, [editor, currentSessionId, saveBoardState, syncBoardToBackend]);
 
-  // Helper: load board state from localStorage
-  const loadBoardState = useCallback((sessionId: string) => {
+  // Helper: load board state — tries backend first, falls back to localStorage
+  const loadBoardState = useCallback(async (sessionId: string) => {
     if (!editor) return;
+    try {
+      // Try backend first (server-side persistence — works across browsers)
+      const res = await fetch(`${API_BASE_URL}/sessions/${sessionId}/board`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const storeSnapshot = await res.json();
+        loadSnapshot(editor.store, storeSnapshot);
+        // Update localStorage cache
+        localStorage.setItem(`tablo_board_${sessionId}`, JSON.stringify(storeSnapshot));
+        console.log("[Board] Loaded from backend:", sessionId);
+        return;
+      }
+    } catch (e) {
+      console.warn("[Board] Backend load failed, trying localStorage:", e);
+    }
+    // Fall back to localStorage
     try {
       const key = `tablo_board_${sessionId}`;
       const saved = localStorage.getItem(key);
       if (saved) {
-        console.log("[Board] Found board data for:", key);
         const storeSnapshot = JSON.parse(saved);
         loadSnapshot(editor.store, storeSnapshot);
-      } else {
-        console.log("[Board] No board data found for:", key);
+        console.log("[Board] Loaded from localStorage:", sessionId);
       }
     } catch (e) {
       console.error("Failed to load board state:", e);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
 
   // Helper: clear the board (for new sessions)
@@ -5577,9 +5629,49 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
                     </svg>
                   </button>
 
-                  {/* Upload Document Button */}
+                   {/* Upload Document Button */}
                   <div className="flex items-center">
                     <DocumentUploadButton authHeaders={authHeaders()} sessionId={currentSessionId} />
+                  </div>
+
+                  {/* Session Notes Button */}
+                  <div className="relative">
+                    <button
+                      className={`group relative flex items-center justify-center rounded-lg p-2 text-sm transition-all ${showNotes ? "bg-[#EF7060] text-white" : "bg-white/5 text-[#FCF8F3]/70 hover:bg-white/10 hover:text-[#FCF8F3]"}`}
+                      onClick={() => {
+                        setShowNotes(v => !v);
+                        if (!showNotes && currentSessionId) loadSessionNotes(currentSessionId);
+                      }}
+                      title="Session notes"
+                      type="button"
+                    >
+                      📝
+                    </button>
+                    {showNotes && (
+                      <div
+                        className="absolute bottom-full mb-2 right-0 w-72 rounded-xl border border-white/10 bg-[#1A2F4B]/97 shadow-2xl backdrop-blur-xl overflow-hidden"
+                        style={{ zIndex: 500 }}
+                      >
+                        <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
+                          <span className="text-[10px] font-bold tracking-widest text-[#FCF8F3]/50 uppercase">Session Notes</span>
+                          <button onClick={() => setShowNotes(false)} className="text-[#FCF8F3]/40 hover:text-[#FCF8F3] text-xs">✕</button>
+                        </div>
+                        <div className="max-h-64 overflow-y-auto p-2">
+                          {sessionNotes.length === 0 ? (
+                            <p className="text-xs text-[#FCF8F3]/40 text-center py-4">No notes yet — Tablo will add notes as you learn.</p>
+                          ) : (
+                            [...sessionNotes].reverse().map((note, i) => (
+                              <div key={i} className="mb-2 rounded-lg bg-white/5 p-2.5">
+                                <p className="text-xs text-[#FCF8F3]/90 leading-relaxed">{note.text}</p>
+                                <p className="mt-1 text-[10px] text-[#FCF8F3]/30">
+                                  {new Date(note.timestamp).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}
+                                </p>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="h-8 w-px bg-white/10 mx-1"></div>

@@ -45,3 +45,17 @@ If profile says `"hint_that_worked": {"subnetting": "pizza slice analogy"}`:
 - Don't mention the profile to the learner ("I see from your profile that...")
 - Just naturally adapt — the learner should feel understood, not analyzed
 - Don't update the profile with trivial observations
+
+## Session Notes
+
+Call `save_session_note` to leave a brief record of what happened this session.
+The learner can review these notes in the app.
+
+**Call it when:**
+- A topic is fully covered: `"Covered Pythagorean theorem — visual proof on board + a²+b²=c² formula"`
+- The learner has a breakthrough: `"Subnetting clicked after the pizza slice analogy"`
+- You stop mid-topic: `"Stopped at TCP 3-way handshake step 2 — good resumption point"`
+- End of session: `"Session covered: OSI layers 1-3, TCP handshake intro"`
+
+**Don't call it every turn.** Only at natural stopping points or topic completions.
+

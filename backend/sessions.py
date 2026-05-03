@@ -176,3 +176,50 @@ def _remove_from_learner_sessions(learner_id: str, session_id: str) -> None:
 
     with open(list_path, "w") as f:
         json.dump(session_ids, f)
+
+
+# ── Board state persistence ────────────────────────────────────────────────────
+
+
+def save_board_state(session_id: str, snapshot: dict) -> None:
+    """Persist the tldraw board snapshot JSON for a session."""
+    path = _sessions_dir() / f"{session_id}_board.json"
+    with open(path, "w") as f:
+        json.dump(snapshot, f)
+
+
+def load_board_state(session_id: str) -> dict | None:
+    """Load the tldraw board snapshot for a session. Returns None if not found."""
+    path = _sessions_dir() / f"{session_id}_board.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# ── Session notes ──────────────────────────────────────────────────────────────
+
+
+def add_session_note(session_id: str, note: str) -> None:
+    """Append an agent-written note to the session JSON (max 20 notes kept)."""
+    path = _session_path(session_id)
+    if not path.exists():
+        return
+    try:
+        with open(path) as f:
+            session = json.load(f)
+        notes = session.get("notes", [])
+        notes.append({
+            "text": note,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        session["notes"] = notes[-20:]  # keep last 20
+        session["last_accessed"] = datetime.now(timezone.utc).isoformat()
+        with open(path, "w") as f:
+            json.dump(session, f, indent=2)
+    except Exception:
+        pass  # non-critical — never crash the agent over a note
+

@@ -43,6 +43,7 @@ from learner_memory import (
     apply_update,
     format_profile_for_prompt,
 )
+from sessions import add_session_note
 from skills_loader import build_system_prompt
 from config import get_env
 from math_eval import evaluate_expression, MathEvaluationError
@@ -128,6 +129,7 @@ class TabloAgent(Agent):
         room,
         learner_id: str,
         learner_profile: dict,
+        session_id: str = "",
         retrieval=None,
         rag_orchestrator=None,
         collection_name: str | None = None,
@@ -140,6 +142,7 @@ class TabloAgent(Agent):
 
         self._room = room
         self._learner_id = learner_id
+        self._session_id = session_id
         self._learner_profile = learner_profile
         self._retrieval = retrieval
         self._rag_orchestrator = rag_orchestrator
@@ -694,6 +697,33 @@ class TabloAgent(Agent):
                 logger.error("update_learner_profile failed: %s", e)
                 return f"Failed to update profile: {e}"
 
+    @function_tool()
+    async def save_session_note(self, context: RunContext, note: str) -> str:
+        """Save a brief note about this session for future reference.
+
+        Call this to record key moments so the learner can review what was covered.
+        Good times to call this:
+        - When a topic is fully explained ("Covered: Pythagorean theorem — visual proof + formula")
+        - When the learner has a breakthrough ("Learner got it after the pizza analogy for subnetting")
+        - When stopping a topic ("Stopped at: TCP 3-way handshake step 2 — resuming next session")
+        - At the end of a session ("Session summary: covered X, Y, Z")
+
+        Keep notes short — 1-2 sentences. Don't call this every turn.
+
+        Args:
+            note: Brief note to save (1-2 sentences max).
+        """
+        with _observe_tool("save_session_note"):
+            try:
+                if not self._session_id:
+                    return "No session ID available — note not saved."
+                add_session_note(self._session_id, note)
+                logger.info("Session note saved for %s: %s", self._session_id, note[:80])
+                return f"Note saved: {note[:80]}"
+            except Exception as e:
+                logger.error("save_session_note failed: %s", e)
+                return f"Failed to save note: {e}"
+
 
 # ─── Entrypoint ───────────────────────────────────────────────────────────────
 
@@ -711,9 +741,14 @@ async def entrypoint(ctx: JobContext):
     AGENT_UP.set(1)
     logger.info("Connected. Starting Gemini Live session...")
 
-    # Derive learner_id from room name (format: tablo-{session_id}-{hex})
-    # In production this would come from auth. For now use room name as key.
-    learner_id = ctx.room.name.replace("tablo-", "").split("-")[0] or "default"
+    # Derive learner_id and session_id from room name
+    # Room name format: tablo-{session_id}-{6char_hex}
+    room = ctx.room.name
+    raw = room[len("tablo-"):] if room.startswith("tablo-") else room
+    parts = raw.rsplit("-", 1)
+    session_id = parts[0] if (len(parts) == 2 and len(parts[1]) == 6) else raw
+    # learner_id: keep existing derivation for profile compatibility
+    learner_id = raw.split("-")[0] or "default"
 
     # Load learner profile and build dynamic system prompt
     learner_profile = load_profile(learner_id)
@@ -765,6 +800,7 @@ async def entrypoint(ctx: JobContext):
         room=ctx.room,
         learner_id=learner_id,
         learner_profile=learner_profile,
+        session_id=session_id,
         retrieval=retrieval,
         rag_orchestrator=None,
         collection_name=ingestion._collection,

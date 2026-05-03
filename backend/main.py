@@ -41,6 +41,9 @@ from sessions import (
     delete_session,
     set_active_doc,
     add_doc_to_session,
+    save_board_state,
+    load_board_state,
+    add_session_note,
 )
 
 load_dotenv()
@@ -644,6 +647,47 @@ def set_session_active_doc(
 
     updated = set_active_doc(session_id, payload.doc_id)
     return SessionResponse(**updated)
+
+
+@app.get("/sessions/{session_id}/board")
+def get_session_board(
+    session_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """Return the saved tldraw board snapshot for a session."""
+    state = load_board_state(session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="No board state saved for this session")
+    return state
+
+
+@app.put("/sessions/{session_id}/board", status_code=204)
+async def save_session_board(
+    session_id: str,
+    snapshot: dict,
+    user_id: str = Depends(get_current_user),
+):
+    """Persist the tldraw board snapshot for a session."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    if session.get("learner_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    save_board_state(session_id, snapshot)
+
+
+@app.get("/sessions/{session_id}/notes")
+def get_session_notes(
+    session_id: str,
+    user_id: str = Depends(get_current_user),
+) -> dict:
+    """Return the agent-written notes for a session."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
+    if session.get("learner_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return {"session_id": session_id, "notes": session.get("notes", [])}
 
 
 # Content-Type mapping for file serving
