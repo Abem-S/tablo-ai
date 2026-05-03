@@ -4506,7 +4506,8 @@ function applyBoardCommand(
       }
 
       case "create_3d_cylinder": {
-        const { x: cylX, y: cylY, radius: cylR, height: cylH, label: cylL } = command;
+        const { radius: cylR, height: cylH, label: cylL } = command;
+        const { x: cylX, y: cylY } = resolvePlacement(editor, command, cylR * 2, cylH);
         const { faces, edges } = calculateCylinderProjection(cylX, cylY, cylR, cylH);
         const svgParts: string[] = [];
         for (const face of faces) {
@@ -4529,7 +4530,8 @@ function applyBoardCommand(
       }
 
       case "create_3d_cone": {
-        const { x: coneX, y: coneY, radius: coneR, height: coneH, label: coneL } = command;
+        const { radius: coneR, height: coneH, label: coneL } = command;
+        const { x: coneX, y: coneY } = resolvePlacement(editor, command, coneR * 2, coneH);
         const { faces, edges } = calculateConeProjection(coneX, coneY, coneR, coneH);
         const svgParts: string[] = [];
         for (const face of faces) {
@@ -4552,7 +4554,8 @@ function applyBoardCommand(
       }
 
       case "create_3d_pyramid": {
-        const { x: pyrX, y: pyrY, baseSize: pyrB, height: pyrH, label: pyrL } = command;
+        const { baseSize: pyrB, height: pyrH, label: pyrL } = command;
+        const { x: pyrX, y: pyrY } = resolvePlacement(editor, command, pyrB, pyrH);
         const { faces, edges } = calculatePyramidProjection(pyrX, pyrY, pyrB, pyrH);
         const svgParts: string[] = [];
         for (const face of faces) {
