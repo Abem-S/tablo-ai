@@ -164,28 +164,26 @@ class RetrievalPipeline:
             )
             # Build a simple filter for single-doc sessions
             filter_: dict | None = None
-            if allowed_doc_ids and len(allowed_doc_ids) == 1:
-                filter_ = {"doc_id": allowed_doc_ids[0]}
-            # Over-fetch when filtering so we still get top_k after post-filter
-            fetch_k = top_k if not allowed_doc_ids else top_k * 3
+            if allowed_doc_ids:
+                filter_ = {"doc_id": allowed_doc_ids}
+                
+            # Qdrant will natively filter, so we just need top_k
             results = vs.search_vectors(
                 self._client,
                 self._collection,
                 query_vector=embedding,
-                top_k=fetch_k,
+                top_k=top_k,
                 filter_=filter_,
             )
-            allowed_set = set(allowed_doc_ids) if allowed_doc_ids else None
+            
             scored: list[ScoredChunk] = []
             for r in results:
                 p = r["payload"]
-                if allowed_set and p.get("doc_id") not in allowed_set:
-                    continue
                 chunk = self._payload_to_chunk(p)
                 scored.append(
                     ScoredChunk(chunk=chunk, score=r["score"], source="vector")
                 )
-            return scored[:top_k]
+            return scored
         except asyncio.TimeoutError:
             logger.warning("Vector search timed out")
             return []
