@@ -121,7 +121,7 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
     case "create_text":
     case "create_formula":
     case "create_multiline_text": {
-      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y)) {
+      if (!(cmd as any).place && (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y))) {
         return { 
           valid: false, 
           error: { 
@@ -135,8 +135,10 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
     }
       
     case "create_geo": {
-      if (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y) || 
-          !Number.isFinite(cmd.w) || !Number.isFinite(cmd.h)) {
+      if (!(cmd as any).place && (!Number.isFinite(cmd.x) || !Number.isFinite(cmd.y))) {
+        return { valid: false, error: { code: "VALIDATION_FAILED", message: "Missing placement or x/y coordinates" } };
+      }
+      if (!Number.isFinite(cmd.w) || !Number.isFinite(cmd.h)) {
         return { 
           valid: false, 
           error: { 
@@ -622,14 +624,21 @@ function logCommand(cmd: BoardCommand, result: CommandResult): void {
   }
 }
 
+
+export type PlacementOptions = 
+  | "auto"
+  | { below: string; margin?: number }
+  | { rightOf: string; margin?: number };
+
 type BoardCommand =
   | {
       v: number;
       id: string;
       op: "create_text";
       text: string;
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       fontSize?: number;
       color?: string;
     }
@@ -638,8 +647,9 @@ type BoardCommand =
       id: string;
       op: "create_multiline_text";
       lines: string[];
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       fontSize?: number;
       color?: string;
       alignment?: "left" | "center" | "right";
@@ -659,8 +669,9 @@ type BoardCommand =
       id: string;
       op: "create_formula";
       formula: string;
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       fontSize?: number;
       color?: string;
     }
@@ -669,8 +680,9 @@ type BoardCommand =
       id: string;
       op: "create_geo";
       geo: "rectangle" | "ellipse" | "diamond" | "triangle";
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       w: number;
       h: number;
       label?: string;
@@ -740,8 +752,9 @@ type BoardCommand =
       id: string;
       op: "create_svg";
       svg: string;
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       w?: number;
       h?: number;
       color?: string;
@@ -756,8 +769,9 @@ type BoardCommand =
         color?: string;     // line color, defaults to a palette
         label?: string;     // legend label
       }>;
-      x: number;            // board position
-      y: number;
+      x?: number;            // board position
+      y?: number;
+      place?: PlacementOptions;
       w?: number;           // canvas width in px, default 400
       h?: number;           // canvas height in px, default 300
       xMin?: number;        // x-axis range, default -2*pi
@@ -775,8 +789,9 @@ type BoardCommand =
       exprY: string;        // y = g(t), e.g. "sin(t)"
       tMin?: number;        // parameter range, default 0
       tMax?: number;        // parameter range, default 2*pi
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       w?: number;
       h?: number;
       color?: string;
@@ -856,8 +871,9 @@ type BoardCommand =
       v: number;
       id: string;
       op: "snap_to_grid";
-      x: number;
-      y: number;
+      x?: number;
+      y?: number;
+      place?: PlacementOptions;
       gridSize?: number;
     }
   | {
@@ -912,21 +928,27 @@ type BoardCommand =
       id: string;
       op: "create_polygon";
       sides: number;          // 3=triangle, 5=pentagon, 6=hexagon, etc.
-      x: number;              // center x
-      y: number;              // center y
+      x?: number;              // center x
+      y?: number;
+      place?: PlacementOptions;              // center y
       radius: number;         // circumradius in px
       rotation?: number;      // rotation in degrees, default 0
       star?: boolean;         // if true, draw a star (inner radius = radius/2.5)
       label?: string;
     }
   // ─── 3D Shapes (isometric projection) ────────────────────────────────────
-  | { v: number; id: string; op: "create_3d_cube";     x: number; y: number; size: number;  label?: string; edgeLabels?: string[] }
-  | { v: number; id: string; op: "create_3d_prism";    x: number; y: number; width: number; height: number; depth: number; triangular?: boolean; label?: string }
-  | { v: number; id: string; op: "create_3d_cylinder"; x: number; y: number; radius: number; height: number; label?: string }
-  | { v: number; id: string; op: "create_3d_cone";     x: number; y: number; radius: number; height: number; label?: string }
-  | { v: number; id: string; op: "create_3d_pyramid";  x: number; y: number; baseSize: number; height: number; label?: string };
+  | { v: number; id: string; op: "create_3d_cube";     x?: number; y?: number;
+      place?: PlacementOptions; size: number;  label?: string; edgeLabels?: string[] }
+  | { v: number; id: string; op: "create_3d_prism";    x?: number; y?: number;
+      place?: PlacementOptions; width: number; height: number; depth: number; triangular?: boolean; label?: string }
+  | { v: number; id: string; op: "create_3d_cylinder"; x?: number; y?: number;
+      place?: PlacementOptions; radius: number; height: number; label?: string }
+  | { v: number; id: string; op: "create_3d_cone";     x?: number; y?: number;
+      place?: PlacementOptions; radius: number; height: number; label?: string }
+  | { v: number; id: string; op: "create_3d_pyramid";  x?: number; y?: number;
+      place?: PlacementOptions; baseSize: number; height: number; label?: string };
 
-type Point = { x: number; y: number };
+type Point = { x?: number; y: number };
 
 // ============================================
 // Board State Types (Req 3.1, 3.2, 3.3, 5.3)
@@ -938,11 +960,11 @@ interface ShapeInfo {
   id: string;
   type: ShapeType;
   bounds: PageRect;
-  center: { x: number; y: number };
+  center: { x?: number; y: number };
   color?: string;
   label?: string;
   createdAt: number;
-  zIndex: number;
+  zIndex?: number;
 }
 
 interface ShapeRelationship {
@@ -1174,7 +1196,7 @@ function isAdjacent(a: PageRect, b: PageRect, threshold = 5): boolean {
 /**
  * Calculate distance between two points
  */
-function calculateDistance(p1: { x: number; y: number }, p2: { x: number; y: number }): number {
+function calculateDistance(p1: { x?: number; y: number }, p2: { x?: number; y: number }): number {
   const dx = p1.x - p2.x;
   const dy = p1.y - p2.y;
   return Math.sqrt(dx * dx + dy * dy);
@@ -1485,7 +1507,7 @@ function findAlternativePosition(
   proposedBounds: PageRect,
   direction: "right" | "down" | "left" | "up" = "right",
   minDistance: number = 20
-): { x: number; y: number } {
+): { x?: number; y: number } {
   // Try shifting in the given direction
   let offset = minDistance;
   const maxAttempts = 10;
@@ -1585,7 +1607,7 @@ function getBoundsFromCommand(cmd: BoardCommand): PageRect | null {
  */
 function modifyCommandPosition(
   cmd: BoardCommand,
-  newPosition: { x: number; y: number }
+  newPosition: { x?: number; y: number }
 ): BoardCommand | null {
   // Create a deep copy to avoid mutating the original
   const modified = JSON.parse(JSON.stringify(cmd)) as BoardCommand;
@@ -1660,7 +1682,7 @@ function getBoardBounds(editor: Editor): BoardBounds | null {
 /**
  * Calculate distance between two points (Req 10.2)
  */
-function calculatePointDistance(p1: { x: number; y: number }, p2: { x: number; y: number }): number {
+function calculatePointDistance(p1: { x?: number; y: number }, p2: { x?: number; y: number }): number {
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
   return Math.sqrt(dx * dx + dy * dy);
@@ -1762,7 +1784,7 @@ function detectEmptyRegions(boardBounds: BoardBounds, shapes: Map<string, ShapeI
 /**
  * Calculate center of mass of shape clusters (Req 10.4)
  */
-function calculateCenterOfMass(shapes: ShapeInfo[]): { x: number; y: number } | null {
+function calculateCenterOfMass(shapes: ShapeInfo[]): { x?: number; y: number } | null {
   if (shapes.length === 0) return null;
 
   const sumX = shapes.reduce((sum, s) => sum + s.center.x, 0);
@@ -1783,8 +1805,9 @@ function suggestOptimalPlacement(
   boardBounds: BoardBounds,
   shapes: Map<string, ShapeInfo>,
   preferredRegion?: string
-): { x: number; y: number }[] {
-  const suggestions: { x: number; y: number; region: string }[] = [];
+): { x?: number; y: number }[] {
+  const suggestions: { x?: number; y?: number;
+      place?: PlacementOptions; region: string }[] = [];
 
   // Get quadrants and identify empty or less-crowded regions
   const quadrants = getBoardQuadrants(boardBounds, shapes);
@@ -3037,6 +3060,52 @@ function buildGraphSvg(
   return svg;
 }
 
+
+function resolvePlacement(editor: Editor, cmd: any, estimatedW: number = 200, estimatedH: number = 100): { x: number, y: number } {
+  if (!cmd.place) {
+    return { x: cmd.x ?? 0, y: cmd.y ?? 0 };
+  }
+
+  const padding = 20;
+
+  if (cmd.place === "auto") {
+    const shapeIds = editor.getCurrentPageShapeIds();
+    let maxY = 0;
+    let found = false;
+    for (const id of shapeIds) {
+      const bounds = editor.getShapePageBounds(id);
+      if (bounds) {
+        maxY = Math.max(maxY, bounds.maxY);
+        found = true;
+      }
+    }
+    const vp = editor.getViewportPageBounds();
+    if (!found) {
+      return { x: vp.x + vp.w/2 - estimatedW/2, y: vp.y + vp.h/2 - estimatedH/2 };
+    }
+    return { x: vp.x + vp.w/2 - estimatedW/2, y: maxY + padding };
+  }
+
+  // Relative placement
+  const targetId = (cmd.place.below || cmd.place.rightOf) as string;
+  const margin = cmd.place.margin ?? padding;
+  
+  if (targetId) {
+    const bounds = editor.getShapePageBounds(targetId as any);
+    if (bounds) {
+      if (cmd.place.below) {
+        return { x: bounds.minX, y: bounds.maxY + margin };
+      } else if (cmd.place.rightOf) {
+        return { x: bounds.maxX + margin, y: bounds.minY };
+      }
+    }
+  }
+
+  // Fallback to viewport center if target not found
+  const vp = editor.getViewportPageBounds();
+  return { x: vp.x + vp.w/2 - estimatedW/2, y: vp.y + vp.h/2 - estimatedH/2 };
+}
+
 function applyBoardCommand(
   editor: Editor,
   command: BoardCommand,
@@ -3070,10 +3139,7 @@ function applyBoardCommand(
           break;
         }
 
-        // Use agent coordinates if valid, otherwise viewport center
-        const vpText = editor.getViewportPageBounds();
-        const textX = Number.isFinite(command.x) ? command.x : vpText.x + vpText.w / 2 - 50;
-        const textY = Number.isFinite(command.y) ? command.y : vpText.y + vpText.h / 2;
+        const { x: textX, y: textY } = resolvePlacement(editor, command, 200, 50);
 
         const fontSizeNum = typeof command.fontSize === "number" && Number.isFinite(command.fontSize)
           ? command.fontSize : 24;

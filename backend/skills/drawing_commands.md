@@ -83,13 +83,29 @@ Expression syntax: `sin(x)`, `cos(x)`, `tan(x)`, `x^2`, `sqrt(x)`, `log(x)`, `ex
 {"op":"clear_board"}
 ```
 
+
 ## Positioning Helpers
 
+Instead of manually calculating `x` and `y` coordinates, you can use the `place` property to automatically position shapes. This prevents overlapping and guarantees a clean layout.
+
+```json
+{"op":"create_text","text":"Step 2","place":"auto"}
+{"op":"create_geo","geo":"rectangle","place":{"below":"shape:abc","margin":20},"w":120,"h":80}
+{"op":"create_svg","svg":"<svg>...</svg>","place":{"rightOf":"shape:xyz"}}
+```
+- `"place": "auto"` — Finds an empty region at the bottom of the board and drops the shape there safely.
+- `"place": {"below": "shape_id"}` — Places the shape perfectly below the target.
+- `"place": {"rightOf": "shape_id"}` — Places the shape perfectly to the right of the target.
+
+You should ALMOST ALWAYS use `"place": "auto"` or relative placement instead of passing raw `x` and `y` coordinates, unless you are drawing intersecting diagrams (like a Venn Diagram).
+
+You still have access to manual queries if absolutely needed:
 ```json
 {"op":"get_position_info","query":"empty_regions"}
 {"op":"suggest_placement","preferredRegion":"right"}
 {"op":"calculate_position","sourceShapeId":"shape:abc","relativeTo":"right","offset":50}
 ```
+
 
 ## 3D Shapes (Isometric Projection)
 
