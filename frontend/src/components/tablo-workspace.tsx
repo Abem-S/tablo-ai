@@ -342,6 +342,14 @@ function validateCommand(cmd: BoardCommand): { valid: boolean; error?: CommandEr
       break;
 
     case "create_polygon": {
+      // Allow place-based placement
+      if (cmd.place) {
+        if (!cmd.sides || cmd.sides < 3) {
+          return { valid: false, error: { code: "VALIDATION_FAILED", message: "sides must be >= 3", details: {} } };
+        }
+        return { valid: true };
+      }
+      // Otherwise require explicit coordinates
       if (!cmd.sides || cmd.sides < 3) {
         return { valid: false, error: { code: "VALIDATION_FAILED", message: "sides must be >= 3", details: {} } };
       }
@@ -3956,18 +3964,14 @@ function applyBoardCommand(
       // Regular polygon / star by math
       // ============================================
       case "create_polygon": {
-        const { sides, x: px, y: py, radius, rotation = 0, star = false, label } = command;
+        const { sides, radius, rotation = 0, star = false, label } = command;
         if (!sides || sides < 3 || !radius) {
           console.warn("[create_polygon] Invalid params", command);
           break;
         }
 
-        const vp = editor.getViewportPageBounds();
-        let cx = px, cy = py;
-        if (cx < vp.x || cx > vp.x + vp.w || cy < vp.y || cy > vp.y + vp.h) {
-          cx = vp.x + vp.w / 2;
-          cy = vp.y + vp.h / 2;
-        }
+        // Use resolvePlacement for positioning
+        const { x: cx, y: cy } = resolvePlacement(editor, command, radius * 2.5, radius * 2.5);
 
         const rotRad = (rotation * Math.PI) / 180;
         const points: string[] = [];
@@ -4476,8 +4480,9 @@ function applyBoardCommand(
       // 3D Shape Commands (isometric projection)
       // ============================================
       case "create_3d_cube": {
-        const { x: cx3, y: cy3, size, label: lbl3d, edgeLabels } = command;
-        const { faces, edges } = calculateCubeProjection(cx3, cy3, size);
+        const { size, label: lbl3d, edgeLabels } = command;
+        const { x: cx3, y: cy3 } = resolvePlacement(editor, command, size || 100, size || 100);
+        const { faces, edges } = calculateCubeProjection(cx3, cy3, size || 100);
         const svgParts: string[] = [];
         for (const face of faces) {
           const pts = face.points.map((p) => `${(p.x - cx3).toFixed(1)},${(p.y - cy3).toFixed(1)}`).join(" ");
@@ -4500,10 +4505,11 @@ function applyBoardCommand(
       }
 
       case "create_3d_prism": {
-        const { x: px3, y: py3, width: pw, height: ph, depth: pd, triangular, label: pl } = command;
+        const { width: pw, height: ph, depth: pd, triangular, label: pl } = command;
+        const { x: px3, y: py3 } = resolvePlacement(editor, command, pw || 150, ph || 100);
         const { faces, edges } = triangular
-          ? calculateTriangularPrismProjection(px3, py3, pw, ph, pd)
-          : calculatePrismProjection(px3, py3, pw, ph, pd);
+          ? calculateTriangularPrismProjection(px3, py3, pw || 150, ph || 100, pd || 80)
+          : calculatePrismProjection(px3, py3, pw || 150, ph || 100, pd || 80);
         const svgParts: string[] = [];
         for (const face of faces) {
           const pts = face.points.map((p) => `${(p.x - px3).toFixed(1)},${(p.y - py3).toFixed(1)}`).join(" ");
