@@ -775,16 +775,16 @@ async def entrypoint(ctx: JobContext):
     )
 
     # Initialise RAG components
-    # Use LOCAL_ADMIN_USER_ID so the agent reads/writes the same per-user
-    # Qdrant collection as the FastAPI document endpoints.
+    # Use user_id=None so the agent reads/writes the same tablo_shared
+    # Qdrant collection as the FastAPI document endpoints in OSS mode.
     # In a SaaS fork, replace this with the authenticated user's ID.
     kg = KnowledgeGraph()
     kg.load()
-    ingestion = IngestionPipeline(knowledge_graph=kg, user_id=LOCAL_ADMIN_USER_ID)
+    ingestion = IngestionPipeline(knowledge_graph=kg, user_id=None)
     retrieval = RetrievalPipeline(
         knowledge_graph=kg,
         collection=ingestion._collection,
-        user_id=LOCAL_ADMIN_USER_ID,
+        user_id=None,
     )
 
     model = google.beta.realtime.RealtimeModel(
