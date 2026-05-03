@@ -63,7 +63,6 @@ services:
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
-      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
     depends_on:
       - qdrant
     restart: unless-stopped
@@ -86,7 +85,6 @@ services:
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
-      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
       - ./secrets:/run/secrets:ro
     depends_on:
       - qdrant
@@ -111,7 +109,6 @@ services:
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
-      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
     depends_on:
       - qdrant
 
@@ -148,7 +145,6 @@ services:
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
-      - ./backend/data/knowledge_graph.json:/app/data/knowledge_graph.json
       - ./secrets:/run/secrets:ro
     depends_on:
       - qdrant

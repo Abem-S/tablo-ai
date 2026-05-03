@@ -46,6 +46,13 @@ fi
 echo ""
 echo "Starting Tablo via Docker Compose..."
 echo "This will start Qdrant, LiveKit, the Backend API, the AI Agent, and the Frontend."
+
+# Pre-create required data directories and seed files so Docker doesn't create them as directories
+mkdir -p backend/data/uploads backend/data/learner_profiles backend/data/sessions backend/data/learner_sessions
+if [ ! -f "backend/data/knowledge_graph.json" ]; then
+    echo '{"nodes": [], "edges": []}' > backend/data/knowledge_graph.json
+fi
+
 docker compose up -d --build
 
 echo ""
