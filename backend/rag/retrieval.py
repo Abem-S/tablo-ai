@@ -250,16 +250,21 @@ class RetrievalPipeline:
     # Graph search
     # ------------------------------------------------------------------
 
-    def graph_search(self, query: str, top_k: int = 5) -> list[ScoredChunk]:
+    def graph_search(
+        self, query: str, top_k: int = 5, allowed_doc_ids: list[str] | None = None
+    ) -> list[ScoredChunk]:
         """Traverse knowledge graph for concepts matching query keywords."""
         try:
             query_words = set(query.lower().split())
             matched: dict[str, tuple[Chunk, float]] = {}
+            allowed_set = set(allowed_doc_ids) if allowed_doc_ids else None
 
             for concept_name, concept_id in self._kg._by_name.items():
                 node = self._kg._nodes.get(concept_id)
                 if not node:
                     continue
+                
+                # Check overlap first
                 concept_words = set(concept_name.split())
                 overlap = len(query_words & concept_words) / max(len(concept_words), 1)
                 if overlap < 0.3:
@@ -267,6 +272,10 @@ class RetrievalPipeline:
 
                 related = self._kg.get_prerequisites(node.name)
                 for n in [node] + related:
+                    # Skip nodes not in the current session
+                    if allowed_set and n.doc_id not in allowed_set:
+                        continue
+                        
                     for chunk_id in n.chunk_ids:
                         if chunk_id in matched:
                             continue
@@ -425,15 +434,8 @@ class RetrievalPipeline:
         try:
             vector_results, graph_results = await asyncio.gather(
                 self.vector_search(query, top_k=top_k * 2, allowed_doc_ids=allowed_doc_ids),
-                asyncio.to_thread(self.graph_search, query, top_k=top_k),
+                asyncio.to_thread(self.graph_search, query, top_k=top_k, allowed_doc_ids=allowed_doc_ids),
             )
-
-            # Post-filter graph results to session documents
-            if allowed_doc_ids:
-                allowed_set = set(allowed_doc_ids)
-                graph_results = [
-                    sc for sc in graph_results if sc.chunk.doc_id in allowed_set
-                ]
 
             vector_filtered = [sc for sc in vector_results if sc.score >= threshold]
             graph_filtered = [sc for sc in graph_results if sc.score >= threshold]

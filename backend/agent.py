@@ -510,14 +510,16 @@ class TabloAgent(Agent):
                     if fresh:
                         self._session_doc_ids = fresh.get("doc_ids", [])
 
+                if not self._session_doc_ids:
+                    return "No documents have been uploaded to this session yet. Rely on your general knowledge."
+
                 result = await self._retrieval.retrieve(
                     query=query,
                     turn_id=str(uuid4()),
                     top_k=4,
                     threshold=0.1,
-                    allowed_doc_ids=self._session_doc_ids or None,
+                    allowed_doc_ids=self._session_doc_ids,
                 )
-
                 logger.info(
                     "search_documents: retrieved %d chunks, is_general_knowledge=%s",
                     len(result.context.sources),

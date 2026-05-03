@@ -110,13 +110,16 @@ def search_vectors(
     filter_: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Search a collection. Returns list of {id, score, payload} dicts."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
     qdrant_filter = None
     if filter_:
-        conditions = [
-            FieldCondition(key=k, match=MatchValue(value=v)) for k, v in filter_.items()
-        ]
+        conditions = []
+        for k, v in filter_.items():
+            if isinstance(v, list):
+                conditions.append(FieldCondition(key=k, match=MatchAny(any=v)))
+            else:
+                conditions.append(FieldCondition(key=k, match=MatchValue(value=v)))
         qdrant_filter = Filter(must=conditions)
 
     results = client.query_points(
