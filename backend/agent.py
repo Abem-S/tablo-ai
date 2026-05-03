@@ -504,6 +504,12 @@ class TabloAgent(Agent):
                     )
                     self._learner_context = None
 
+                # Refresh doc_ids from disk — picks up documents uploaded mid-session
+                if self._session_id:
+                    fresh = get_session(self._session_id)
+                    if fresh:
+                        self._session_doc_ids = fresh.get("doc_ids", [])
+
                 result = await self._retrieval.retrieve(
                     query=query,
                     turn_id=str(uuid4()),
