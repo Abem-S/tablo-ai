@@ -106,6 +106,7 @@ services:
       - ./.env
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - LIVEKIT_URL=ws://livekit:7880
       - AGENT_METRICS_ENABLED=true
       - AGENT_METRICS_PORT=9091
     volumes:
