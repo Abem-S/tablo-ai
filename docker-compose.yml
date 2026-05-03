@@ -63,6 +63,8 @@ services:
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
+      - ./backend/data/sessions:/app/data/sessions
+      - ./backend/data/learner_sessions:/app/data/learner_sessions
     depends_on:
       - qdrant
     restart: unless-stopped
@@ -109,6 +111,8 @@ services:
     volumes:
       - ./backend/data/uploads:/app/data/uploads
       - ./backend/data/learner_profiles:/app/data/learner_profiles
+      - ./backend/data/sessions:/app/data/sessions
+      - ./backend/data/learner_sessions:/app/data/learner_sessions
     depends_on:
       - qdrant
 
