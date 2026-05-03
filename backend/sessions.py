@@ -212,14 +212,15 @@ def add_session_note(session_id: str, note: str) -> None:
         with open(path) as f:
             session = json.load(f)
         notes = session.get("notes", [])
-        notes.append({
-            "text": note,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        notes.append(
+            {
+                "text": note,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         session["notes"] = notes[-20:]  # keep last 20
         session["last_accessed"] = datetime.now(timezone.utc).isoformat()
         with open(path, "w") as f:
             json.dump(session, f, indent=2)
     except Exception:
         pass  # non-critical — never crash the agent over a note
-

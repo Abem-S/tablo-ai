@@ -718,7 +718,9 @@ class TabloAgent(Agent):
                 if not self._session_id:
                     return "No session ID available — note not saved."
                 add_session_note(self._session_id, note)
-                logger.info("Session note saved for %s: %s", self._session_id, note[:80])
+                logger.info(
+                    "Session note saved for %s: %s", self._session_id, note[:80]
+                )
                 return f"Note saved: {note[:80]}"
             except Exception as e:
                 logger.error("save_session_note failed: %s", e)
@@ -744,7 +746,7 @@ async def entrypoint(ctx: JobContext):
     # Derive learner_id and session_id from room name
     # Room name format: tablo-{session_id}-{6char_hex}
     room = ctx.room.name
-    raw = room[len("tablo-"):] if room.startswith("tablo-") else room
+    raw = room[len("tablo-") :] if room.startswith("tablo-") else room
     parts = raw.rsplit("-", 1)
     session_id = parts[0] if (len(parts) == 2 and len(parts[1]) == 6) else raw
     # learner_id: keep existing derivation for profile compatibility

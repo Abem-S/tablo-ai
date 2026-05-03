@@ -657,7 +657,9 @@ def get_session_board(
     """Return the saved tldraw board snapshot for a session."""
     state = load_board_state(session_id)
     if state is None:
-        raise HTTPException(status_code=404, detail="No board state saved for this session")
+        raise HTTPException(
+            status_code=404, detail="No board state saved for this session"
+        )
     return state
 
 
