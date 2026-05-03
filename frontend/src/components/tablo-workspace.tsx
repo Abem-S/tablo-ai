@@ -5445,7 +5445,8 @@ export function TabloWorkspace({ authToken }: { authToken?: string | null }) {
     setTimeout(() => {
       connectLiveKitWithSession(newSessionId);
     }, 1200);
-  }, [currentSessionId, editor, saveBoardState, syncBoardToBackend, loadSessionDocuments]);
+  }, [currentSessionId, editor, saveBoardState, syncBoardToBackend]);
+
 
 
   // Handle new session creation - create new session and clear board
