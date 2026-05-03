@@ -165,7 +165,8 @@ def start_metrics_server(
         # Port already bound by a previous job process — metrics are best-effort.
         # Never crash the agent session over this.
         logger.info(
-            "Metrics server port %d already in use — skipping (another job has it)", port
+            "Metrics server port %d already in use — skipping (another job has it)",
+            port,
         )
         _METRICS_SERVER_STARTED = True
         return
@@ -174,4 +175,3 @@ def start_metrics_server(
     thread.start()
     _METRICS_SERVER_STARTED = True
     logger.info("Metrics server listening on :%d", port)
-

@@ -166,7 +166,7 @@ class RetrievalPipeline:
             filter_: dict | None = None
             if allowed_doc_ids:
                 filter_ = {"doc_id": allowed_doc_ids}
-                
+
             # Qdrant will natively filter, so we just need top_k
             results = vs.search_vectors(
                 self._client,
@@ -175,7 +175,7 @@ class RetrievalPipeline:
                 top_k=top_k,
                 filter_=filter_,
             )
-            
+
             scored: list[ScoredChunk] = []
             for r in results:
                 p = r["payload"]
@@ -261,7 +261,7 @@ class RetrievalPipeline:
                 node = self._kg._nodes.get(concept_id)
                 if not node:
                     continue
-                
+
                 # Check overlap first
                 concept_words = set(concept_name.split())
                 overlap = len(query_words & concept_words) / max(len(concept_words), 1)
@@ -273,7 +273,7 @@ class RetrievalPipeline:
                     # Skip nodes not in the current session
                     if allowed_set and n.doc_id not in allowed_set:
                         continue
-                        
+
                     for chunk_id in n.chunk_ids:
                         if chunk_id in matched:
                             continue
@@ -431,8 +431,15 @@ class RetrievalPipeline:
         start = time.monotonic()
         try:
             vector_results, graph_results = await asyncio.gather(
-                self.vector_search(query, top_k=top_k * 2, allowed_doc_ids=allowed_doc_ids),
-                asyncio.to_thread(self.graph_search, query, top_k=top_k, allowed_doc_ids=allowed_doc_ids),
+                self.vector_search(
+                    query, top_k=top_k * 2, allowed_doc_ids=allowed_doc_ids
+                ),
+                asyncio.to_thread(
+                    self.graph_search,
+                    query,
+                    top_k=top_k,
+                    allowed_doc_ids=allowed_doc_ids,
+                ),
             )
 
             vector_filtered = [sc for sc in vector_results if sc.score >= threshold]
@@ -461,4 +468,3 @@ class RetrievalPipeline:
                 turn_id=turn_id, context_text="", sources=[], is_general_knowledge=True
             )
             return RetrievalResult(context=context, elapsed_ms=elapsed_ms)
-
