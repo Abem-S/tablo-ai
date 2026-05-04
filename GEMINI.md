@@ -93,6 +93,7 @@ Single `execute_command(command_json)` tool. Full command set:
 | Math graphs | `create_graph` — frontend evaluates with mathjs (accurate) |
 | Parametric | `create_parametric_graph` — exprX/exprY as functions of t |
 | Polygons | `create_polygon` — precise n-gons and stars |
+| 3D shapes | `create_3d_cube`, `create_3d_prism`, `create_3d_cylinder`, `create_3d_cone`, `create_3d_pyramid` — isometric projection |
 | Board state | `get_board_state`, `get_shape_info`, `match_shapes` |
 | Mutation | `update_shape`, `delete_shape`, `undo` |
 | Cleanup | `clear_board`, `clear_shapes`, `clear_region` |

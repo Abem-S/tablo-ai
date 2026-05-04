@@ -660,6 +660,7 @@ A full AI drawing system has been built on top of the `board.command` data topic
 | Math graphs | `create_graph` — agent provides expressions; frontend evaluates with `mathjs` and renders an accurate canvas plot |
 | Parametric graphs | `create_parametric_graph` — agent provides `exprX`/`exprY` as functions of `t` |
 | Regular polygons | `create_polygon` — mathematically precise n-gons and stars by circumradius |
+| 3D shapes | `create_3d_cube`, `create_3d_prism`, `create_3d_cylinder`, `create_3d_cone`, `create_3d_pyramid` — isometric projection |
 | Board state | `get_board_state`, `get_shape_info`, `match_shapes` |
 | Shape mutation | `update_shape`, `delete_shape`, `undo` |
 | Cleanup | `clear_board`, `clear_shapes`, `clear_region` |

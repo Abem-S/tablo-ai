@@ -120,7 +120,7 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 - `update_learner_profile` — writes learner observations to persistent profile.
 
 **Frontend (`frontend/src/components/tablo-workspace.tsx`):**
-- Full command set: text, geometry, SVG, math graphs, parametric graphs, polygons, board state, shape mutation, cleanup, positioning, labels, alignment
+- Full command set: text, geometry, SVG, math graphs, parametric graphs, polygons, 3D shapes, board state, shape mutation, cleanup, positioning, labels, alignment
 - Command validation layer rejects malformed commands with typed error codes
 - All commands logged with success/failure status
 
