@@ -34,6 +34,8 @@ cd tablo-ai
 ```
 The script will prompt for your API key, generate the `.env` files, and spin everything up via Docker Compose. Once running, open `http://localhost:3000` in your browser.
 
+> ⏱️ **First-time build takes 3-5 minutes.** Docker needs to download dependencies and build the images. Go grab a coffee ☕ — subsequent runs are much faster!
+
 ---
 
 ## 🛠️ The 2026 Tech Stack
