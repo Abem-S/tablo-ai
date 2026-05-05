@@ -765,7 +765,7 @@ async def entrypoint(ctx: JobContext):
     # Load learner profile and session context to build dynamic system prompt
     learner_profile = load_profile(learner_id)
     profile_section = format_profile_for_prompt(learner_profile)
-    
+
     # Load session context (notes, last topic) for continuity
     session_data = get_session(session_id)
     session_context = ""
@@ -775,15 +775,14 @@ async def entrypoint(ctx: JobContext):
         if notes:
             last_note = notes[-1]
             session_context += f"\n\nLast session note: {last_note.get('text', '')}"
-        
+
         # Load last active topic if stored
         last_topic = session_data.get("last_active_topic")
         if last_topic:
             session_context += f"\n\nLast active topic: {last_topic}"
-    
+
     system_prompt = build_system_prompt(
-        learner_profile_section=profile_section,
-        session_context=session_context
+        learner_profile_section=profile_section, session_context=session_context
     )
 
     logger.info(
@@ -842,7 +841,7 @@ async def entrypoint(ctx: JobContext):
     # Scope RAG to this session's documents (session_context already loaded above)
     if session_data:
         tablo_agent._session_doc_ids = session_data.get("doc_ids", [])
-        
+
         logger.info(
             "Session %s has %d documents for RAG scoping",
             session_id,
@@ -875,10 +874,8 @@ async def entrypoint(ctx: JobContext):
     logger.info("Agent session started in room: %s", ctx.room.name)
 
     # Build greeting with session context
-    greeting_instructions = (
-        "Greet the learner briefly in voice only — do NOT write anything on the board yet. "
-    )
-    
+    greeting_instructions = "Greet the learner briefly in voice only — do NOT write anything on the board yet. "
+
     # Add session context if available
     if session_context:
         greeting_instructions += (

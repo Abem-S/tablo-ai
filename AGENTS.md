@@ -97,7 +97,13 @@ Agent behavior is defined in modular markdown files in `backend/skills/`, not ha
 - `document_grounding.md` — when/how to use RAG and diagrams
 - `learner_adaptation.md` — how to read and update the learner profile
 
-`backend/skills_loader.py` assembles the dynamic system prompt = skills + learner profile section at session start. Edit a skill file and restart the worker — no code changes needed.
+`backend/skills_loader.py` assembles the dynamic system prompt = skills + learner profile + session context at session start. Edit a skill file and restart the worker — no code changes needed.
+
+#### Session Context
+
+- Session notes (via `save_session_note` tool) are stored in session JSON and loaded into system prompt on next session start
+- Last active topic is tracked per session for continuity
+- When learner says "continue from where we stopped", the agent references this context to pick up the right topic
 
 #### Learner Memory
 
@@ -159,7 +165,7 @@ A full AI drawing system on top of the `board.command` data topic. The agent use
 **Key implementation notes:**
 - RAG context injection via `update_instructions` has been removed — it was getting compressed away by the sliding window. The `search_documents` tool is the only RAG path.
 - Tool results returned to Gemini Live must be ≤500 chars. Larger results cause 1008/1011 WebSocket disconnects.
-- `context_window_compression` is enabled on the RealtimeModel with `trigger_tokens=25000` and `target_tokens=12000`.
+- `context_window_compression` is enabled on the RealtimeModel with `trigger_tokens=20000` and `target_tokens=15000` (less aggressive to reduce voice pauses).
 - The `google-genai` SDK (not the deprecated `google-generativeai`) is used for all Gemini calls in the RAG pipeline.
 - Do NOT use `gemini-2.5-flash-native-audio-latest` — use the dated preview.
 

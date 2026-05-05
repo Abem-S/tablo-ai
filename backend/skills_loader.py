@@ -56,7 +56,9 @@ def load_all_skills() -> str:
     return combined
 
 
-def build_system_prompt(learner_profile_section: str = "", session_context: str = "") -> str:
+def build_system_prompt(
+    learner_profile_section: str = "", session_context: str = ""
+) -> str:
     """Assemble the full system prompt from skills + learner profile + session context.
 
     Args:
@@ -70,10 +72,10 @@ def build_system_prompt(learner_profile_section: str = "", session_context: str 
     skills = load_all_skills()
 
     parts = [skills]
-    
+
     if learner_profile_section:
         parts.append(learner_profile_section)
-    
+
     if session_context:
         parts.append(f"## Current Session Context\n{session_context}")
 

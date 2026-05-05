@@ -14,7 +14,7 @@ Tablo is a **voice-first, board-first** real-time Socratic AI whiteboard for col
 - **Gemini Live voice loop** — `agent.py` runs as a separate worker (`python agent.py dev`), connects to the room, starts `google.beta.realtime.RealtimeModel` with `model="gemini-2.5-flash-native-audio-preview-12-2025"`
 - **Agent greets on join** via `session.generate_reply()`
 - **Mic** uses `echoCancellation: true`, `noiseSuppression: true`, `autoGainControl: true`
-- **Context window compression** — `trigger_tokens=25000`, `target_tokens=12000` via `ContextWindowCompressionConfig`
+- **Context window compression** — `trigger_tokens=20000`, `target_tokens=15000` via `ContextWindowCompressionConfig` (less aggressive to reduce voice pauses)
 
 ### Board Vision — Triggered Snapshots
 
