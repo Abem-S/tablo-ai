@@ -762,10 +762,29 @@ async def entrypoint(ctx: JobContext):
     # learner_id: keep existing derivation for profile compatibility
     learner_id = raw.split("-")[0] or "default"
 
-    # Load learner profile and build dynamic system prompt
+    # Load learner profile and session context to build dynamic system prompt
     learner_profile = load_profile(learner_id)
     profile_section = format_profile_for_prompt(learner_profile)
-    system_prompt = build_system_prompt(learner_profile_section=profile_section)
+    
+    # Load session context (notes, last topic) for continuity
+    session_data = get_session(session_id)
+    session_context = ""
+    if session_data:
+        # Load session notes for context
+        notes = session_data.get("notes", [])
+        if notes:
+            last_note = notes[-1]
+            session_context += f"\n\nLast session note: {last_note.get('text', '')}"
+        
+        # Load last active topic if stored
+        last_topic = session_data.get("last_active_topic")
+        if last_topic:
+            session_context += f"\n\nLast active topic: {last_topic}"
+    
+    system_prompt = build_system_prompt(
+        learner_profile_section=profile_section,
+        session_context=session_context
+    )
 
     logger.info(
         "Loaded profile for learner '%s' — %d mastered, %d struggles",
@@ -792,9 +811,11 @@ async def entrypoint(ctx: JobContext):
         voice="Aoede",
         proactivity=True,
         enable_affective_dialog=True,
+        # Compression config - triggers at 20K, compresses to 15K (only 25% reduction)
+        # This is less aggressive than before (52% reduction) to minimize voice pauses
         context_window_compression=genai_types.ContextWindowCompressionConfig(
-            trigger_tokens=25000,
-            sliding_window=genai_types.SlidingWindow(target_tokens=12000),
+            trigger_tokens=20000,
+            sliding_window=genai_types.SlidingWindow(target_tokens=15000),
         ),
         instructions=(
             "You are Tablo, a Socratic AI teacher on a collaborative whiteboard. "
@@ -818,10 +839,10 @@ async def entrypoint(ctx: JobContext):
         collection_name=ingestion._collection,
     )
 
-    # Scope RAG to this session's documents
-    session_data = get_session(session_id)
+    # Scope RAG to this session's documents (session_context already loaded above)
     if session_data:
         tablo_agent._session_doc_ids = session_data.get("doc_ids", [])
+        
         logger.info(
             "Session %s has %d documents for RAG scoping",
             session_id,
@@ -853,14 +874,26 @@ async def entrypoint(ctx: JobContext):
 
     logger.info("Agent session started in room: %s", ctx.room.name)
 
-    await session.generate_reply(
-        instructions=(
-            "Greet the learner briefly in voice only — do NOT write anything on the board yet. "
+    # Build greeting with session context
+    greeting_instructions = (
+        "Greet the learner briefly in voice only — do NOT write anything on the board yet. "
+    )
+    
+    # Add session context if available
+    if session_context:
+        greeting_instructions += (
+            f"Reference what they were last working on: '{session_context}'. "
+            "Say something like 'Welcome back! I remember we were working on [topic]. "
+            "Should we continue from where we left off?' "
+        )
+    else:
+        greeting_instructions += (
             "If you know them from a previous session (check the learner profile), acknowledge it naturally. "
             "Just say something like 'Hey! What would you like to work on today?' or "
             "'Welcome back! Ready to continue?' if you have session history."
         )
-    )
+
+    await session.generate_reply(instructions=greeting_instructions)
 
     @session.on("user_speech_committed")
     def on_user_speech_committed(msg):

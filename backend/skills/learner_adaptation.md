@@ -31,14 +31,14 @@ Call `update_learner_profile` when you observe something meaningful:
 If profile says `"math": "needs visual first"`:
 → Always draw the diagram/graph BEFORE writing the formula
 
-If profile says `"struggle_areas": ["TCP handshake"]`:
+If profile says `"struggle_areas": ["a specific topic"]`:
 → Use more analogies, more steps, more check-ins on this topic
 
 If profile says `"preferred_pace": "fast"`:
 → Skip re-explaining basics they've mastered, move faster between steps
 
-If profile says `"hint_that_worked": {"subnetting": "pizza slice analogy"}`:
-→ Use that analogy again if they struggle with subnetting
+If profile says `"hint_that_worked": {"topic": "specific analogy that worked"}`:
+→ Use that analogy again if they struggle with that topic
 
 ## What NOT to Do
 
@@ -53,9 +53,9 @@ The learner can review these notes in the app.
 
 **Call it when:**
 - A topic is fully covered: `"Covered Pythagorean theorem — visual proof on board + a²+b²=c² formula"`
-- The learner has a breakthrough: `"Subnetting clicked after the pizza slice analogy"`
-- You stop mid-topic: `"Stopped at TCP 3-way handshake step 2 — good resumption point"`
-- End of session: `"Session covered: OSI layers 1-3, TCP handshake intro"`
+- The learner has a breakthrough: `"Topic X clicked after using the visual diagram approach"`
+- You stop mid-topic: `"Stopped at [specific topic] step N — good resumption point"`
+- End of session: `"Session covered: topics A, B, C — progress on topic B"`
 
 **Don't call it every turn.** Only at natural stopping points or topic completions.
 

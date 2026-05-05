@@ -56,21 +56,28 @@ def load_all_skills() -> str:
     return combined
 
 
-def build_system_prompt(learner_profile_section: str = "") -> str:
-    """Assemble the full system prompt from skills + learner profile.
+def build_system_prompt(learner_profile_section: str = "", session_context: str = "") -> str:
+    """Assemble the full system prompt from skills + learner profile + session context.
 
     Args:
         learner_profile_section: Formatted learner profile string from
                                   learner_memory.format_profile_for_prompt()
+        session_context: Session-specific context (notes, topics, last activity)
 
     Returns:
         Complete system prompt string ready to pass to the agent.
     """
     skills = load_all_skills()
 
+    parts = [skills]
+    
     if learner_profile_section:
-        return f"{skills}\n\n---\n\n{learner_profile_section}"
-    return skills
+        parts.append(learner_profile_section)
+    
+    if session_context:
+        parts.append(f"## Current Session Context\n{session_context}")
+
+    return "\n\n---\n\n".join(parts)
 
 
 def reload_skills() -> None:

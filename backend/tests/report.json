@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-05-01T19:50:44.246857+00:00",
-  "total_elapsed_ms": 116295.1,
+  "timestamp": "2026-05-05T17:07:24.447638+00:00",
+  "total_elapsed_ms": 1814.0,
   "summary": {
-    "total": 37,
-    "passed": 35,
-    "failed": 2,
-    "avg_score": 0.926
+    "total": 16,
+    "passed": 10,
+    "failed": 6,
+    "avg_score": 0.625
   },
   "categories": {
     "drawing": {
@@ -17,122 +17,121 @@
       "issues": []
     },
     "rag": {
-      "passed": 5,
-      "failed": 1,
-      "skipped": 0,
-      "avg_latency_ms": 4491.6,
-      "avg_score": 0.833,
-      "issues": [
-        "Concept extraction returned no nodes — check GOOGLE_API_KEY"
-      ]
+      "passed": 0,
+      "failed": 0,
+      "skipped": 6,
+      "avg_latency_ms": 0,
+      "avg_score": 0.0,
+      "issues": []
     },
     "skills": {
       "passed": 6,
       "failed": 0,
       "skipped": 0,
-      "avg_latency_ms": 0.2,
+      "avg_latency_ms": 13.9,
       "avg_score": 1.0,
       "issues": []
     },
     "formats": {
-      "passed": 6,
+      "passed": 4,
       "failed": 0,
-      "skipped": 0,
-      "avg_latency_ms": 59.2,
+      "skipped": 2,
+      "avg_latency_ms": 285.4,
       "avg_score": 1.0,
       "issues": []
     },
     "calculate": {
-      "passed": 10,
-      "failed": 0,
+      "passed": 0,
+      "failed": 1,
       "skipped": 0,
-      "avg_latency_ms": 0.1,
-      "avg_score": 1.0,
+      "avg_latency_ms": 0,
+      "avg_score": 0.0,
       "issues": []
     },
     "compression": {
-      "passed": 5,
-      "failed": 0,
+      "passed": 0,
+      "failed": 1,
       "skipped": 0,
-      "avg_latency_ms": 0.0,
-      "avg_score": 1.0,
+      "avg_latency_ms": 0,
+      "avg_score": 0.0,
       "issues": []
     },
     "agent": {
-      "passed": 3,
-      "failed": 1,
+      "passed": 0,
+      "failed": 4,
       "skipped": 0,
-      "avg_latency_ms": 19556.7,
-      "avg_score": 0.562,
+      "avg_latency_ms": 81.4,
+      "avg_score": 0.0,
       "issues": [
-        "This is an API availability issue, not a system bug"
+        "Check Qdrant connection"
       ]
     }
   },
   "recommendations": [
-    "Add Qdrant payload index on doc_id — retrieval 3359ms > 2000ms target"
+    "Calculate tool failed — check math_eval.py",
+    "RAG compression failed — check retrieval.compress_context()"
   ],
   "results": [
     {
       "name": "rag/ingestion_latency",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 20664.2,
-      "details": "Status: complete, chunks: 1, concepts: 0, 20664ms",
-      "recommendation": "Ingestion >10s — consider batching embeddings",
-      "skipped": false
+      "latency_ms": 0.0,
+      "details": "SKIPPED: Qdrant not running",
+      "recommendation": "",
+      "skipped": true
     },
     {
       "name": "rag/retrieval_latency",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 3358.7,
-      "details": "Latency: 3359ms, sources: 1",
-      "recommendation": "Add Qdrant payload index on doc_id",
-      "skipped": false
+      "latency_ms": 0.0,
+      "details": "SKIPPED: Qdrant not running",
+      "recommendation": "",
+      "skipped": true
     },
     {
       "name": "rag/retrieval_quality",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 1502.1,
-      "details": "Sources: 1, OSI: True, layers: True, 7: True",
+      "latency_ms": 0.0,
+      "details": "SKIPPED: Qdrant not running",
       "recommendation": "",
-      "skipped": false
+      "skipped": true
     },
     {
       "name": "rag/threshold_behavior",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 1347.9,
-      "details": "Sources at threshold=0.7: 0, is_general: True",
+      "latency_ms": 0.0,
+      "details": "SKIPPED: Qdrant not running",
       "recommendation": "",
-      "skipped": false
+      "skipped": true
     },
     {
       "name": "rag/knowledge_graph",
-      "passed": false,
-      "score": 0.0,
+      "passed": true,
+      "score": 1.0,
       "latency_ms": 0.0,
-      "details": "Total concepts: 0, networking-related: 0",
-      "recommendation": "Concept extraction returned no nodes — check GOOGLE_API_KEY",
-      "skipped": false
+      "details": "SKIPPED: Qdrant not running",
+      "recommendation": "",
+      "skipped": true
     },
     {
       "name": "rag/diagram_recipe_storage",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 76.6,
-      "details": "Points: 1, all have field: True, no missing: True, valid JSON: True",
+      "latency_ms": 0.0,
+      "details": "SKIPPED: Qdrant not running",
       "recommendation": "",
-      "skipped": false
+      "skipped": true
     },
     {
       "name": "skills/loading",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 0.4,
-      "details": "Loaded 4/4 files\n  core_teaching.md: 2719 chars\n  learner_adaptation.md: 1858 chars\n  document_grounding.md: 1412 chars\n  drawing_commands.md: 5462 chars",
+      "latency_ms": 69.6,
+      "details": "Loaded 4/4 files\n  core_teaching.md: 2719 chars\n  learner_adaptation.md: 2473 chars\n  document_grounding.md: 1412 chars\n  drawing_commands.md: 6410 chars",
       "recommendation": "",
       "skipped": false
     },
@@ -140,8 +139,8 @@
       "name": "skills/prompt_assembly",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 0.1,
-      "details": "Length: 11472 chars, sections: 4",
+      "latency_ms": 0.3,
+      "details": "Length: 13035 chars, sections: 4",
       "recommendation": "",
       "skipped": false
     },
@@ -149,8 +148,8 @@
       "name": "skills/profile_injection",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 0.3,
-      "details": "Prompt length: 11653 chars",
+      "latency_ms": 12.4,
+      "details": "Prompt length: 13216 chars",
       "recommendation": "",
       "skipped": false
     },
@@ -159,7 +158,7 @@
       "passed": true,
       "score": 1.0,
       "latency_ms": 0.2,
-      "details": "Checked 6 phrases in 11472 chars",
+      "details": "Checked 6 phrases in 13035 chars",
       "recommendation": "",
       "skipped": false
     },
@@ -167,7 +166,7 @@
       "name": "skills/profile_persistence",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 0.4,
+      "latency_ms": 0.6,
       "details": "All fields persisted correctly",
       "recommendation": "",
       "skipped": false
@@ -185,7 +184,7 @@
       "name": "formats/txt",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 0.3,
+      "latency_ms": 190.4,
       "details": "Pages: 3, chars: 120, titles: ['INTRODUCTION:', 'OSI MODEL:', 'TRANSPORT LAYER:']",
       "recommendation": "",
       "skipped": false
@@ -194,7 +193,7 @@
       "name": "formats/csv",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 0.2,
+      "latency_ms": 38.6,
       "details": "Pages: 1, chars: 77",
       "recommendation": "",
       "skipped": false
@@ -203,7 +202,7 @@
       "name": "formats/html",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 82.7,
+      "latency_ms": 912.6,
       "details": "Pages: 1, chars: 104",
       "recommendation": "",
       "skipped": false
@@ -212,19 +211,19 @@
       "name": "formats/docx",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 84.6,
-      "details": "Pages: 4, chars: 198, titles: ['Network Fundamentals', 'Network Fundamentals', 'The OSI Model']",
+      "latency_ms": 0.0,
+      "details": "SKIPPED: python-docx not installed",
       "recommendation": "",
-      "skipped": false
+      "skipped": true
     },
     {
       "name": "formats/pptx",
       "passed": true,
       "score": 1.0,
-      "latency_ms": 187.1,
-      "details": "Slides: 3, chars: 218, pages: [1, 2, 3]",
+      "latency_ms": 0.0,
+      "details": "SKIPPED: python-pptx not installed",
       "recommendation": "",
-      "skipped": false
+      "skipped": true
     },
     {
       "name": "formats/viewer_routing",
@@ -236,155 +235,38 @@
       "skipped": false
     },
     {
-      "name": "calculate/basic_arithmetic",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.2,
-      "details": "Result: 4",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/exponent_caret",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.2,
-      "details": "Result: 1024",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/trig",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.2,
-      "details": "Result: 1.0",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/rejects_bad_input",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.2,
-      "details": "Unsafe expression rejected",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/empty_expression",
-      "passed": true,
-      "score": 1.0,
+      "name": "calculate/suite_error",
+      "passed": false,
+      "score": 0.0,
       "latency_ms": 0.0,
-      "details": "Empty expression rejected correctly",
+      "details": "Suite error: No module named 'asteval'",
       "recommendation": "",
       "skipped": false
     },
     {
-      "name": "calculate/too_long_expression",
-      "passed": true,
-      "score": 1.0,
+      "name": "compression/suite_error",
+      "passed": false,
+      "score": 0.0,
       "latency_ms": 0.0,
-      "details": "Too-long expression rejected correctly",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/sqrt",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.2,
-      "details": "Result: 12.0",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/factorial",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.1,
-      "details": "Result: 120",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/pi_constant",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.1,
-      "details": "Result: 3.141592653589793",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "calculate/rejects_exec",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.2,
-      "details": "exec() rejected correctly",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "rag/compression_max_len",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.0,
-      "details": "len=200",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "rag/compression_truncation",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.0,
-      "details": "len=120",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "rag/compression_empty_context",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.0,
-      "details": "len=0, result=''",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "rag/compression_diagram_hints_only",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.0,
-      "details": "len=129, has p.5: True, has p.12: True",
-      "recommendation": "",
-      "skipped": false
-    },
-    {
-      "name": "rag/compression_respects_max_chars",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 0.1,
-      "details": "All max_chars limits respected",
+      "details": "Suite error: No module named 'prometheus_client'",
       "recommendation": "",
       "skipped": false
     },
     {
       "name": "agent/tool_call_rate",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 24729.3,
-      "details": "Called search_documents: 10/10 (100%)\n✓ What is the OSI model?\n✓ Explain TCP handshake\n✓ What are the layers of the network stack?\n✓ How does subnetting work?\n✓ What is the difference between TCP and UDP?\n✓ Explain the Pythagorean theorem\n✓ What is a derivative in calculus?\n✓ How do logic gates work?\n✓ What is supply and demand?\n✓ Explain Newton's second law",
+      "passed": false,
+      "score": 0.0,
+      "latency_ms": 7.7,
+      "details": "Exception: cannot import name 'genai' from 'google' (unknown location)",
       "recommendation": "",
       "skipped": false
     },
     {
       "name": "agent/board_image_description",
-      "passed": true,
-      "score": 1.0,
-      "latency_ms": 2798.2,
-      "details": "Description (125 chars): The whiteboard displays the equation `a² + b² = c²`. Directly below this equation, the text \"Pythagorean Theorem\" is written.",
+      "passed": false,
+      "score": 0.0,
+      "latency_ms": 316.7,
+      "details": "Exception: cannot import name 'genai' from 'google' (unknown location)",
       "recommendation": "",
       "skipped": false
     },
@@ -392,18 +274,18 @@
       "name": "agent/socratic_quality",
       "passed": false,
       "score": 0.0,
-      "latency_ms": 10289.8,
-      "details": "No turns completed — API unavailable during test. Re-run when API is stable.",
-      "recommendation": "This is an API availability issue, not a system bug",
+      "latency_ms": 0.1,
+      "details": "Exception: cannot import name 'genai' from 'google' (unknown location)",
+      "recommendation": "",
       "skipped": false
     },
     {
       "name": "agent/concurrent_qdrant",
-      "passed": true,
-      "score": 0.25,
-      "latency_ms": 40409.6,
-      "details": "3 concurrent ingestions in 30855ms, isolation: BREACH (known blocker — requires auth)\nIssues: User 0 can see user 1's content (isolation breach)\nUser 1 can see user 2's content (isolation breach)\nUser 2 can see user 0's content (isolation breach)",
-      "recommendation": "KNOWN BLOCKER: Data isolation requires auth + per-user Qdrant collections. Implement auth first.",
+      "passed": false,
+      "score": 0.0,
+      "latency_ms": 1.2,
+      "details": "Exception: No module named 'prometheus_client'",
+      "recommendation": "Check Qdrant connection",
       "skipped": false
     }
   ]
